@@ -2,11 +2,11 @@
 
 A high-performance Claude Code hook that blocks destructive commands before they execute, protecting your work from accidental deletion by AI coding agents.
 
-> **Note on the name:** Despite being called `git_safety_guard`, this tool protects against a broader class of destructive operations—not just git commands. The name reflects the project's origins but is admittedly a misnomer. The tool blocks destructive git commands, dangerous filesystem operations (`rm -rf`), and is designed to be extended to cover database operations, container commands, and other irreversible actions. Think of it as a **"destructive command guard"** for AI agents.
+> **Note on the name:** Despite the name, this tool protects against more than git commands. It blocks destructive git commands, dangerous filesystem operations (`rm -rf`), and is designed to extend to database operations, container commands, and other irreversible actions. A more accurate name would be **"destructive command guard"**, but the git-centric name has stuck.
 
 ## Origins & Authors
 
-This project began as a Python script by Jeffrey Emanuel, who recognized that AI coding agents—while incredibly useful—have a tendency to occasionally run catastrophic commands that destroy hours of uncommitted work. The original implementation was a simple but effective hook that intercepted dangerous git and filesystem commands before execution.
+This project began as a Python script by Jeffrey Emanuel, who recognized that AI coding agents, while incredibly useful, occasionally run catastrophic commands that destroy hours of uncommitted work. The original implementation was a simple but effective hook that intercepted dangerous git and filesystem commands before execution.
 
 - **[Jeffrey Emanuel](https://github.com/Dicklesworthstone)** - Original concept and Python implementation ([source](https://github.com/Dicklesworthstone/misc_coding_agent_tips_and_scripts/blob/main/DESTRUCTIVE_GIT_COMMAND_CLAUDE_HOOKS_SETUP.md))
 - **[Dowwie](https://github.com/Dowwie)** - Rust port with performance optimizations
@@ -22,7 +22,7 @@ AI coding agents are powerful but fallible. They can accidentally run destructiv
 - **"Let me fix the merge conflict"** → `git checkout -- .` (discards all modifications)
 - **"I'll clean up untracked files"** → `git clean -fd` (permanently deletes untracked files)
 
-This hook intercepts dangerous commands *before* execution and blocks them with a clear explanation, giving you a chance to stash your changes first—or consciously decide to proceed by running the command manually.
+This hook intercepts dangerous commands *before* execution and blocks them with a clear explanation, giving you a chance to stash your changes first, or to consciously proceed by running the command manually.
 
 ## What It Blocks
 
@@ -320,7 +320,7 @@ Every Bash command passes through this hook. Performance is critical:
 
 ### Safe Patterns (Whitelist)
 
-The safe pattern list contains 28 patterns covering:
+The safe pattern list contains 34 patterns covering:
 
 | Category | Patterns | Purpose |
 |----------|----------|---------|
@@ -330,8 +330,8 @@ The safe pattern list contains 28 patterns covering:
 | Temp cleanup | `rm -rf /tmp/*`, `rm -rf /var/tmp/*` | Ephemeral directories are safe |
 | Variable expansion | `rm -rf $TMPDIR/*`, `rm -rf ${TMPDIR}/*` | Shell variable forms |
 | Quoted paths | `rm -rf "$TMPDIR/*"` | Quoted variable forms |
-| Separate flags | `rm -r -f /tmp/*` | Flag ordering variants |
-| Long flags | `rm --recursive --force /tmp/*` | GNU-style long options |
+| Separate flags | `rm -r -f /tmp/*`, `rm -r -f $TMPDIR/*` | Flag ordering variants |
+| Long flags | `rm --recursive --force /tmp/*`, `$TMPDIR/*` | GNU-style long options |
 
 ### Destructive Patterns (Blacklist)
 
@@ -444,7 +444,7 @@ Regex patterns are compiled once on first use via `LazyLock`:
 static SAFE_PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     vec![
         pattern!("checkout-new-branch", r"git\s+checkout\s+-b\s+"),
-        // ... 27 more patterns
+        // ... 33 more patterns
     ]
 });
 ```
@@ -500,7 +500,7 @@ The release build uses aggressive optimization settings:
 
 ```toml
 [profile.release]
-opt-level = 3       # Maximum optimization level
+opt-level = "z"     # Optimize for size (lean binary)
 lto = true          # Link-time optimization across crates
 codegen-units = 1   # Single codegen unit for better optimization
 panic = "abort"     # Smaller binary, no unwinding overhead
@@ -579,7 +579,7 @@ This hook assumes the AI agent is **well-intentioned but fallible**. It's design
 cargo test
 ```
 
-The test suite includes 70+ tests covering:
+The test suite includes 80+ tests covering:
 
 - **normalize_command_tests**: Path stripping for git and rm binaries
 - **quick_reject_tests**: Fast-path filtering for non-git/rm commands
@@ -689,7 +689,7 @@ The hook is designed for Claude Code's `PreToolUse` hook protocol. Other tools w
 
 **Q: Why is it called `git_safety_guard` if it blocks more than git commands?**
 
-Historical reasons. The project started as a git-focused safety hook (see Origins above), but the scope has expanded to cover filesystem operations and is planned to expand further to databases, containers, and more. Think of it as a "destructive command guard" that happens to have a git-centric name. Renaming would break existing installations, so we've kept the name while clarifying its broader purpose.
+Historical reasons. The project started as a git-focused safety hook (see Origins above), but the scope has since expanded to cover filesystem operations, with plans to expand further to databases, containers, and more. It's really a "destructive command guard" with a git-centric name. Renaming would break existing installations, so we've kept the name while clarifying its broader purpose.
 
 **Q: Will you add support for blocking database/Docker/Kubernetes commands?**
 
