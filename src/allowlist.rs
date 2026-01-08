@@ -152,6 +152,12 @@ pub struct LayeredAllowlist {
     pub layers: Vec<LoadedAllowlistLayer>,
 }
 
+impl Default for LayeredAllowlist {
+    fn default() -> Self {
+        Self { layers: Vec::new() }
+    }
+}
+
 impl LayeredAllowlist {
     /// Construct a layered allowlist from explicit file paths.
     ///
@@ -205,6 +211,47 @@ impl LayeredAllowlist {
         }
         None
     }
+
+    /// Find the first allowlist entry that matches a `(pack_id, pattern_name)` match identity.
+    ///
+    /// Matching supports:
+    /// - Exact rule IDs: `core.git:reset-hard`
+    /// - Pack-scoped wildcard: `core.git:*` (matches any pattern in that pack)
+    #[must_use]
+    pub fn match_rule(&self, pack_id: &str, pattern_name: &str) -> Option<AllowlistHit<'_>> {
+        if pack_id == "*" {
+            // Never allow global bypass via wildcard pack id.
+            return None;
+        }
+
+        for layer in &self.layers {
+            for entry in &layer.file.entries {
+                let AllowSelector::Rule(rule_id) = &entry.selector else {
+                    continue;
+                };
+
+                if rule_id.pack_id != pack_id {
+                    continue;
+                }
+
+                if rule_id.pattern_name == pattern_name || rule_id.pattern_name == "*" {
+                    return Some(AllowlistHit {
+                        layer: layer.layer,
+                        entry,
+                    });
+                }
+            }
+        }
+
+        None
+    }
+}
+
+/// A successful allowlist match (borrowed view).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AllowlistHit<'a> {
+    pub layer: AllowlistLayer,
+    pub entry: &'a AllowEntry,
 }
 
 /// Load allowlist files using the default locations.
@@ -576,5 +623,38 @@ mod tests {
         let (entry, layer) = allowlists.lookup_rule(&rule).expect("must find rule");
         assert_eq!(layer, AllowlistLayer::Project);
         assert_eq!(entry.reason, "project reason");
+    }
+
+    #[test]
+    fn wildcard_pack_rule_matches_any_pattern_in_pack() {
+        let allowlists = LayeredAllowlist {
+            layers: vec![LoadedAllowlistLayer {
+                layer: AllowlistLayer::Project,
+                path: PathBuf::from("project"),
+                file: AllowlistFile {
+                    entries: vec![AllowEntry {
+                        selector: AllowSelector::Rule(RuleId {
+                            pack_id: "core.git".to_string(),
+                            pattern_name: "*".to_string(),
+                        }),
+                        reason: "allow all git rules in this pack".to_string(),
+                        added_by: None,
+                        added_at: None,
+                        expires_at: None,
+                        context: None,
+                        conditions: HashMap::new(),
+                        environments: Vec::new(),
+                        risk_acknowledged: false,
+                    }],
+                    errors: Vec::new(),
+                },
+            }],
+        };
+
+        let hit = allowlists
+            .match_rule("core.git", "reset-hard")
+            .expect("wildcard should match");
+        assert_eq!(hit.layer, AllowlistLayer::Project);
+        assert_eq!(hit.entry.reason, "allow all git rules in this pack");
     }
 }
