@@ -115,6 +115,16 @@ enabled = [
 
 If you encounter commands that should be blocked, please file an issue.
 
+### Environment Variables
+
+Environment variables override config files (highest priority):
+
+- `DCG_PACKS="containers.docker,kubernetes"`: enable packs (comma-separated)
+- `DCG_DISABLE="kubernetes.helm"`: disable packs/sub-packs (comma-separated)
+- `DCG_VERBOSE=1`: verbose output
+- `DCG_COLOR=auto|always|never`: color mode
+- `DCG_BYPASS=1`: bypass dcg entirely (escape hatch; use sparingly)
+
 ## Installation
 
 ### Quick Install (Recommended)
@@ -123,26 +133,26 @@ The easiest way to install is using the install script, which downloads a prebui
 
 ```bash
 # With cache buster (recommended - ensures latest version)
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/dcg/master/install.sh?$(date +%s)" | bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/master/install.sh?$(date +%s)" | bash
 
 # Without cache buster
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/dcg/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/master/install.sh | bash
 ```
 
 **With options:**
 
 ```bash
 # Easy mode: auto-update PATH in shell rc files
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/dcg/master/install.sh?$(date +%s)" | bash -s -- --easy-mode
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/master/install.sh?$(date +%s)" | bash -s -- --easy-mode
 
 # Install specific version
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/dcg/master/install.sh?$(date +%s)" | bash -s -- --version v0.1.0
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/master/install.sh?$(date +%s)" | bash -s -- --version v0.1.0
 
 # Install to /usr/local/bin (system-wide, requires sudo)
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/dcg/master/install.sh?$(date +%s)" | sudo bash -s -- --system
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/master/install.sh?$(date +%s)" | sudo bash -s -- --system
 
 # Build from source instead of downloading binary
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/dcg/master/install.sh?$(date +%s)" | bash -s -- --from-source
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/master/install.sh?$(date +%s)" | bash -s -- --from-source
 ```
 
 > **Note:** If you have [gum](https://github.com/charmbracelet/gum) installed, the installer will use it for fancy terminal formatting.
@@ -163,14 +173,14 @@ This project uses Rust Edition 2024 features and requires the nightly toolchain.
 rustup install nightly
 
 # Install directly from GitHub
-cargo +nightly install --git https://github.com/Dicklesworthstone/dcg
+cargo +nightly install --git https://github.com/Dicklesworthstone/destructive_command_guard
 ```
 
 ### Manual build
 
 ```bash
-git clone https://github.com/Dicklesworthstone/dcg
-cd dcg
+git clone https://github.com/Dicklesworthstone/destructive_command_guard
+cd destructive_command_guard
 # rust-toolchain.toml automatically selects nightly
 cargo build --release
 cp target/release/dcg ~/.local/bin/
@@ -185,7 +195,7 @@ Prebuilt binaries are available for:
 - macOS Apple Silicon (`aarch64-apple-darwin`)
 - Windows (`x86_64-pc-windows-msvc`)
 
-Download from [GitHub Releases](https://github.com/Dicklesworthstone/dcg/releases) and verify the SHA256 checksum.
+Download from [GitHub Releases](https://github.com/Dicklesworthstone/destructive_command_guard/releases) and verify the SHA256 checksum.
 
 ## Claude Code Configuration
 

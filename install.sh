@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
-# git_safety_guard installer
+# dcg installer
 #
 # One-liner install (with cache buster):
-#   curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/git_safety_guard/master/install.sh?$(date +%s)" | bash
+#   curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/master/install.sh?$(date +%s)" | bash
 #
 # Or without cache buster:
-#   curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/git_safety_guard/master/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/master/install.sh | bash
 #
 # Options:
 #   --version vX.Y.Z   Install specific version (default: latest)
@@ -24,7 +24,7 @@ shopt -s lastpipe 2>/dev/null || true
 
 VERSION="${VERSION:-}"
 OWNER="${OWNER:-Dicklesworthstone}"
-REPO="${REPO:-git_safety_guard}"
+REPO="${REPO:-destructive_command_guard}"
 DEST_DEFAULT="$HOME/.local/bin"
 DEST="${DEST:-$DEST_DEFAULT}"
 EASY=0
@@ -34,7 +34,7 @@ FROM_SOURCE=0
 CHECKSUM="${CHECKSUM:-}"
 CHECKSUM_URL="${CHECKSUM_URL:-}"
 ARTIFACT_URL="${ARTIFACT_URL:-}"
-LOCK_FILE="/tmp/git-safety-guard-install.lock"
+LOCK_FILE="/tmp/dcg-install.lock"
 SYSTEM=0
 NO_GUM=0
 
@@ -138,12 +138,12 @@ maybe_add_path() {
           fi
         done
         if [ "$UPDATED" -eq 1 ]; then
-          warn "PATH updated in ~/.zshrc/.bashrc; restart shell to use git_safety_guard"
+          warn "PATH updated in ~/.zshrc/.bashrc; restart shell to use dcg"
         else
-          warn "Add $DEST to PATH to use git_safety_guard"
+          warn "Add $DEST to PATH to use dcg"
         fi
       else
-        warn "Add $DEST to PATH to use git_safety_guard"
+        warn "Add $DEST to PATH to use dcg"
       fi
     ;;
   esac
@@ -211,12 +211,12 @@ if [ "$QUIET" -eq 0 ]; then
       --border-foreground 39 \
       --padding "0 1" \
       --margin "1 0" \
-      "$(gum style --foreground 42 --bold 'git_safety_guard installer')" \
-      "$(gum style --foreground 245 'Blocks destructive git & filesystem commands')"
+      "$(gum style --foreground 42 --bold 'dcg installer')" \
+      "$(gum style --foreground 245 'Blocks destructive commands')"
   else
     echo ""
-    echo -e "\033[1;32mgit_safety_guard installer\033[0m"
-    echo -e "\033[0;90mBlocks destructive git & filesystem commands\033[0m"
+    echo -e "\033[1;32mdcg installer\033[0m"
+    echo -e "\033[0;90mBlocks destructive commands\033[0m"
     echo ""
   fi
 fi
@@ -249,7 +249,7 @@ if [ "$FROM_SOURCE" -eq 0 ]; then
     TAR=$(basename "$ARTIFACT_URL")
     URL="$ARTIFACT_URL"
   elif [ -n "$TARGET" ]; then
-    TAR="git_safety_guard-${TARGET}.tar.xz"
+    TAR="dcg-${TARGET}.tar.xz"
     URL="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/${TAR}"
   else
     warn "No prebuilt artifact for ${OS}/${ARCH}; falling back to build-from-source"
@@ -302,16 +302,16 @@ if [ "$FROM_SOURCE" -eq 1 ]; then
   ensure_rust
   git clone --depth 1 "https://github.com/${OWNER}/${REPO}.git" "$TMP/src"
   (cd "$TMP/src" && cargo build --release)
-  BIN="$TMP/src/target/release/git_safety_guard"
+  BIN="$TMP/src/target/release/dcg"
   [ -x "$BIN" ] || { err "Build failed"; exit 1; }
-  install -m 0755 "$BIN" "$DEST"
-  ok "Installed to $DEST/git_safety_guard (source build)"
+  install -m 0755 "$BIN" "$DEST/dcg"
+  ok "Installed to $DEST/dcg (source build)"
   maybe_add_path
   if [ "$VERIFY" -eq 1 ]; then
-    echo '{"tool_name":"Bash","tool_input":{"command":"git status"}}' | "$DEST/git_safety_guard" || true
+    echo '{"tool_name":"Bash","tool_input":{"command":"git status"}}' | "$DEST/dcg" || true
     ok "Self-test complete"
   fi
-  ok "Done. Binary at: $DEST/git_safety_guard"
+  ok "Done. Binary at: $DEST/dcg"
   exit 0
 fi
 
@@ -331,25 +331,25 @@ ok "Checksum verified"
 
 info "Extracting"
 tar -xf "$TMP/$TAR" -C "$TMP"
-BIN="$TMP/git_safety_guard"
+BIN="$TMP/dcg"
 if [ ! -x "$BIN" ] && [ -n "$TARGET" ]; then
-  BIN="$TMP/git_safety_guard-${TARGET}/git_safety_guard"
+  BIN="$TMP/dcg-${TARGET}/dcg"
 fi
 if [ ! -x "$BIN" ]; then
-  BIN=$(find "$TMP" -maxdepth 3 -type f -name "git_safety_guard" -perm -111 | head -n 1)
+  BIN=$(find "$TMP" -maxdepth 3 -type f -name "dcg" -perm -111 | head -n 1)
 fi
 
 [ -x "$BIN" ] || { err "Binary not found in tar"; exit 1; }
-install -m 0755 "$BIN" "$DEST/git_safety_guard"
-ok "Installed to $DEST/git_safety_guard"
+install -m 0755 "$BIN" "$DEST/dcg"
+ok "Installed to $DEST/dcg"
 maybe_add_path
 
 if [ "$VERIFY" -eq 1 ]; then
-  echo '{"tool_name":"Bash","tool_input":{"command":"git status"}}' | "$DEST/git_safety_guard" || true
+  echo '{"tool_name":"Bash","tool_input":{"command":"git status"}}' | "$DEST/dcg" || true
   ok "Self-test complete"
 fi
 
-ok "Done. Binary at: $DEST/git_safety_guard"
+ok "Done. Binary at: $DEST/dcg"
 echo ""
 info "To configure Claude Code, add to ~/.claude/settings.json:"
 cat <<EOF
@@ -361,7 +361,7 @@ cat <<EOF
         "hooks": [
           {
             "type": "command",
-            "command": "$DEST/git_safety_guard"
+            "command": "$DEST/dcg"
           }
         ]
       }

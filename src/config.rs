@@ -587,7 +587,7 @@ impl Config {
     #[must_use]
     pub fn generate_sample_config() -> String {
         r#"# dcg configuration
-# https://github.com/Dicklesworthstone/dcg
+# https://github.com/Dicklesworthstone/destructive_command_guard
 
 [general]
 # Color output: "auto" | "always" | "never"

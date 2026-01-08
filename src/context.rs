@@ -1077,4 +1077,226 @@ mod tests {
             iterations
         );
     }
+
+    // =========================================================================
+    // Safe String Registry Tests (git_safety_guard-t8x.1)
+    // =========================================================================
+
+    #[test]
+    fn test_registry_echo_is_all_data() {
+        // echo command - all args are data, never executed
+        assert!(SAFE_STRING_REGISTRY.is_all_args_data("echo"));
+        assert!(SAFE_STRING_REGISTRY.is_all_args_data("/bin/echo"));
+        assert!(SAFE_STRING_REGISTRY.is_all_args_data("/usr/bin/echo"));
+    }
+
+    #[test]
+    fn test_registry_printf_is_all_data() {
+        // printf command - all args are data, never executed
+        assert!(SAFE_STRING_REGISTRY.is_all_args_data("printf"));
+        assert!(SAFE_STRING_REGISTRY.is_all_args_data("/usr/bin/printf"));
+    }
+
+    #[test]
+    fn test_registry_bash_is_not_all_data() {
+        // bash is NOT all-data - it executes code!
+        assert!(!SAFE_STRING_REGISTRY.is_all_args_data("bash"));
+        assert!(!SAFE_STRING_REGISTRY.is_all_args_data("sh"));
+        assert!(!SAFE_STRING_REGISTRY.is_all_args_data("python"));
+    }
+
+    #[test]
+    fn test_registry_git_message_flags() {
+        // git -m and --message are data (commit messages)
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("git", "-m"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("git", "--message"));
+        // But other git flags are NOT data
+        assert!(!SAFE_STRING_REGISTRY.is_flag_data("git", "-c"));
+        assert!(!SAFE_STRING_REGISTRY.is_flag_data("git", "--exec"));
+    }
+
+    #[test]
+    fn test_registry_bd_description_flags() {
+        // bd --description, --title, --notes, --reason are data
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("bd", "--description"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("bd", "--title"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("bd", "--notes"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("bd", "--reason"));
+    }
+
+    #[test]
+    fn test_registry_grep_pattern_flags() {
+        // grep -e and --regexp are data (patterns, not code)
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("grep", "-e"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("grep", "--regexp"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("grep", "-F"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("grep", "--fixed-strings"));
+    }
+
+    #[test]
+    fn test_registry_rg_pattern_flags() {
+        // rg -e, --regexp, --fixed-strings are data
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("rg", "-e"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("rg", "--regexp"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("rg", "--fixed-strings"));
+    }
+
+    #[test]
+    fn test_registry_gh_cli_flags() {
+        // gh -t, -b, -m and their long forms are data
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("gh", "-t"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("gh", "--title"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("gh", "-b"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("gh", "--body"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("gh", "-m"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("gh", "--message"));
+    }
+
+    #[test]
+    fn test_registry_data_flags_for_git() {
+        let flags = SAFE_STRING_REGISTRY.data_flags_for_command("git");
+        assert!(flags.contains(&"-m"));
+        assert!(flags.contains(&"--message"));
+    }
+
+    #[test]
+    fn test_registry_data_flags_for_grep() {
+        let flags = SAFE_STRING_REGISTRY.data_flags_for_command("grep");
+        assert!(flags.contains(&"-e"));
+        assert!(flags.contains(&"--regexp"));
+        assert!(flags.contains(&"-F"));
+        assert!(flags.contains(&"--fixed-strings"));
+    }
+
+    #[test]
+    fn test_is_argument_data_echo() {
+        // echo "rm -rf /" - the argument is data
+        assert!(is_argument_data("echo \"rm -rf /\"", None));
+    }
+
+    #[test]
+    fn test_is_argument_data_git_commit_message() {
+        // git commit -m "..." - the -m argument is data
+        assert!(is_argument_data("git commit -m \"Fix rm -rf\"", Some("-m")));
+    }
+
+    #[test]
+    fn test_is_argument_data_rg_pattern() {
+        // rg -e "rm -rf" - the -e argument is data
+        assert!(is_argument_data("rg -e \"rm -rf\" src/", Some("-e")));
+    }
+
+    #[test]
+    fn test_is_argument_data_bash_c_is_not_data() {
+        // bash -c "rm -rf /" - the -c argument is CODE, not data!
+        assert!(!is_argument_data("bash -c \"rm -rf /\"", Some("-c")));
+    }
+
+    #[test]
+    fn test_counterexample_bash_executes() {
+        // Counterexample: bash -c MUST still be treated as code
+        // This test ensures we don't accidentally suppress bash -c
+        assert!(!SAFE_STRING_REGISTRY.is_all_args_data("bash"));
+        assert!(!SAFE_STRING_REGISTRY.is_flag_data("bash", "-c"));
+    }
+
+    #[test]
+    fn test_counterexample_python_executes() {
+        // Counterexample: python -c MUST still be treated as code
+        assert!(!SAFE_STRING_REGISTRY.is_all_args_data("python"));
+        assert!(!SAFE_STRING_REGISTRY.is_flag_data("python", "-c"));
+    }
+
+    #[test]
+    fn test_counterexample_xargs_executes() {
+        // Counterexample: xargs can execute commands
+        assert!(!SAFE_STRING_REGISTRY.is_all_args_data("xargs"));
+    }
+
+    #[test]
+    fn test_false_positive_git_commit_message() {
+        // This should NOT trigger pattern matching on commit message
+        let cmd = "git commit -m \"Fix git reset --hard detection\"";
+
+        // Using the registry, we know -m flag args are data
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("git", "-m"));
+
+        // Combined with context classification, the quoted part is Argument
+        let spans = classify_command(cmd);
+        let msg_span = spans
+            .spans()
+            .iter()
+            .find(|s| s.text(cmd).contains("reset --hard"));
+        assert!(msg_span.is_some());
+        // The message should be classified as Argument (not requiring pattern check)
+        assert_eq!(msg_span.unwrap().kind, SpanKind::Argument);
+    }
+
+    #[test]
+    fn test_false_positive_rg_pattern() {
+        // This should NOT trigger pattern matching on rg pattern
+        let cmd = "rg -e \"rm -rf\" src/";
+
+        // Using the registry, we know -e flag args are data
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("rg", "-e"));
+
+        // The quoted pattern should be classified as Argument
+        let spans = classify_command(cmd);
+        let pattern_span = spans.spans().iter().find(|s| s.text(cmd) == "\"rm -rf\"");
+        assert!(pattern_span.is_some());
+        assert_eq!(pattern_span.unwrap().kind, SpanKind::Argument);
+    }
+
+    #[test]
+    fn test_false_positive_bd_create() {
+        // This should NOT trigger pattern matching on bd description
+        let cmd = "bd create --description=\"This pattern blocks rm -rf\"";
+
+        // Using the registry
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("bd", "--description"));
+
+        // The description should be classified as Argument
+        let spans = classify_command(cmd);
+        let desc_span = spans
+            .spans()
+            .iter()
+            .find(|s| s.text(cmd).contains("rm -rf"));
+        assert!(desc_span.is_some());
+        // Note: current classification treats this as Argument (attached to flag)
+        assert_eq!(desc_span.unwrap().kind, SpanKind::Argument);
+    }
+
+    #[test]
+    fn test_true_positive_bash_c() {
+        // This MUST trigger pattern matching - bash -c is CODE!
+        let cmd = "bash -c \"rm -rf /\"";
+
+        // bash -c is NOT in the data registry
+        assert!(!SAFE_STRING_REGISTRY.is_flag_data("bash", "-c"));
+
+        // The classifier should detect this as InlineCode
+        let spans = classify_command(cmd);
+        let code_span = spans
+            .spans()
+            .iter()
+            .find(|s| s.kind == SpanKind::InlineCode);
+        assert!(code_span.is_some(), "bash -c content must be InlineCode");
+    }
+
+    #[test]
+    fn test_true_positive_python_c() {
+        // This MUST trigger pattern matching - python -c is CODE!
+        let cmd = "python -c \"import os; os.system('rm -rf /')\"";
+
+        // python -c is NOT in the data registry
+        assert!(!SAFE_STRING_REGISTRY.is_flag_data("python", "-c"));
+
+        // The classifier should detect this as InlineCode
+        let spans = classify_command(cmd);
+        let code_span = spans
+            .spans()
+            .iter()
+            .find(|s| s.kind == SpanKind::InlineCode);
+        assert!(code_span.is_some(), "python -c content must be InlineCode");
+    }
 }

@@ -1,7 +1,7 @@
-# git_safety_guard PowerShell installer
+# dcg PowerShell installer
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/Dicklesworthstone/git_safety_guard/master/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/master/install.ps1 | iex
 #
 # Options:
 #   -Version vX.Y.Z   Install specific version (default: latest)
@@ -13,7 +13,7 @@ Param(
   [string]$Version = "",
   [string]$Dest = "$HOME\.local\bin",
   [string]$Owner = "Dicklesworthstone",
-  [string]$Repo = "git_safety_guard",
+  [string]$Repo = "destructive_command_guard",
   [string]$Checksum = "",
   [string]$ChecksumUrl = "",
   [string]$ArtifactUrl = "",
@@ -67,7 +67,7 @@ if (-not [Environment]::Is64BitProcess) {
   exit 1
 }
 $target = "x86_64-pc-windows-msvc"
-$zip = "git_safety_guard-$target.zip"
+$zip = "dcg-$target.zip"
 
 if ($ArtifactUrl) {
   $url = $ArtifactUrl
@@ -76,7 +76,7 @@ if ($ArtifactUrl) {
 }
 
 # Create temp directory
-$tmp = Join-Path ([System.IO.Path]::GetTempPath()) "git_safety_guard_install"
+$tmp = Join-Path ([System.IO.Path]::GetTempPath()) "dcg_install"
 if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 $zipFile = Join-Path $tmp $zip
@@ -118,7 +118,7 @@ $extractDir = Join-Path $tmp "extract"
 [System.IO.Compression.ZipFile]::ExtractToDirectory($zipFile, $extractDir)
 
 # Find binary
-$bin = Get-ChildItem -Path $extractDir -Recurse -Filter "git_safety_guard.exe" | Select-Object -First 1
+$bin = Get-ChildItem -Path $extractDir -Recurse -Filter "dcg.exe" | Select-Object -First 1
 if (-not $bin) {
   Write-Err "Binary not found in zip"
   exit 1
@@ -128,8 +128,8 @@ if (-not $bin) {
 if (-not (Test-Path $Dest)) {
   New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 }
-Copy-Item $bin.FullName (Join-Path $Dest "git_safety_guard.exe") -Force
-Write-Ok "Installed to $Dest\git_safety_guard.exe"
+Copy-Item $bin.FullName (Join-Path $Dest "dcg.exe") -Force
+Write-Ok "Installed to $Dest\dcg.exe"
 
 # PATH management
 $path = [Environment]::GetEnvironmentVariable("PATH", "User")
@@ -138,7 +138,7 @@ if (-not $path.Contains($Dest)) {
     [Environment]::SetEnvironmentVariable("PATH", "$path;$Dest", "User")
     Write-Ok "Added $Dest to PATH (User)"
   } else {
-    Write-Warn "Add $Dest to PATH to use git_safety_guard"
+    Write-Warn "Add $Dest to PATH to use dcg"
   }
 }
 
@@ -149,15 +149,15 @@ Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 if ($Verify) {
   Write-Info "Running self-test..."
   $testInput = '{"tool_name":"Bash","tool_input":{"command":"git status"}}'
-  $result = $testInput | & "$Dest\git_safety_guard.exe"
+  $result = $testInput | & "$Dest\dcg.exe"
   Write-Ok "Self-test complete"
 }
 
-Write-Ok "Done. Binary at: $Dest\git_safety_guard.exe"
+Write-Ok "Done. Binary at: $Dest\dcg.exe"
 Write-Host ""
 Write-Info "To configure Claude Code, add to your settings.json:"
 # Escape backslashes for JSON output (double them for JSON string)
-$jsonPath = ($Dest -replace '\\', '\\\\') + "\\\\git_safety_guard.exe"
+$jsonPath = ($Dest -replace '\\', '\\\\') + "\\\\dcg.exe"
 Write-Host @"
 {
   "hooks": {
