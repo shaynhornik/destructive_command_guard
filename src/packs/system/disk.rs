@@ -10,6 +10,7 @@ use crate::packs::{DestructivePattern, Pack, SafePattern};
 use crate::{destructive_pattern, safe_pattern};
 
 /// Create the Disk pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "system.disk".to_string(),
@@ -99,4 +100,3 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
     ]
 }
-

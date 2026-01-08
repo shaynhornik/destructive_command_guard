@@ -25,7 +25,8 @@ use destructive_command_guard::packs::{REGISTRY, pack_aware_quick_reject};
 use fancy_regex::Regex;
 #[cfg(test)]
 use memchr::memmem;
-use serde::{Deserialize, Serialize};
+// Import hook types for hook mode
+use destructive_command_guard::hook::{HookInput, HookOutput, HookSpecificOutput};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -37,36 +38,8 @@ const BUILD_TIMESTAMP: Option<&str> = option_env!("VERGEN_BUILD_TIMESTAMP");
 const RUSTC_SEMVER: Option<&str> = option_env!("VERGEN_RUSTC_SEMVER");
 const CARGO_TARGET: Option<&str> = option_env!("VERGEN_CARGO_TARGET_TRIPLE");
 
-/// Input structure from Claude Code's `PreToolUse` hook.
-#[derive(Deserialize)]
-struct HookInput {
-    tool_name: Option<String>,
-    tool_input: Option<ToolInput>,
-}
-
-/// Tool-specific input containing the command to execute.
-#[derive(Deserialize)]
-struct ToolInput {
-    command: Option<serde_json::Value>,
-}
-
-/// Output structure for denying a command.
-#[derive(Serialize)]
-struct HookOutput<'a> {
-    #[serde(rename = "hookSpecificOutput")]
-    hook_specific_output: HookSpecificOutput<'a>,
-}
-
-/// Hook-specific output with decision and reason.
-#[derive(Serialize)]
-struct HookSpecificOutput<'a> {
-    #[serde(rename = "hookEventName")]
-    hook_event_name: &'static str,
-    #[serde(rename = "permissionDecision")]
-    permission_decision: &'static str,
-    #[serde(rename = "permissionDecisionReason")]
-    permission_decision_reason: Cow<'a, str>,
-}
+// NOTE: HookInput, ToolInput, HookOutput, HookSpecificOutput types are now defined
+// in the hook module. Use hook::HookInput, hook::read_hook_input(), etc.
 
 /// A safe pattern that, when matched, allows the command immediately.
 struct Pattern {
@@ -305,7 +278,7 @@ static PATH_NORMALIZER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^/(?:\S*/)*s?bin/(rm|git)(?=\s|$)").unwrap());
 
 /// Pre-compiled finders for quick rejection (SIMD-accelerated).
-/// Only used in tests - production code uses pack_aware_quick_reject from packs module.
+/// Only used in tests - production code uses `pack_aware_quick_reject` from packs module.
 #[cfg(test)]
 static GIT_FINDER: LazyLock<memmem::Finder<'static>> = LazyLock::new(|| memmem::Finder::new("git"));
 #[cfg(test)]
@@ -336,8 +309,10 @@ fn normalize_command(cmd: &str) -> Cow<'_, str> {
 /// Returns `true` if the command can be immediately allowed (no "git" or "rm").
 /// This skips expensive regex matching for 99%+ of commands.
 ///
-/// NOTE: This is only used in tests. Production code uses pack_aware_quick_reject
+/// NOTE: This is only used in tests. Production code uses `pack_aware_quick_reject`
 /// from the packs module which checks all enabled pack keywords.
+///
+/// Production uses `pack_aware_quick_reject` which checks all enabled pack keywords.
 #[cfg(test)]
 #[inline]
 fn quick_reject(cmd: &str) -> bool {
@@ -354,91 +329,11 @@ fn configure_colors() {
     }
 }
 
-/// Format the denial message for the JSON output (plain text).
-fn format_denial_message(original_command: &str, reason: &str) -> String {
-    format!(
-        "BLOCKED by dcg\n\n\
-         Reason: {reason}\n\n\
-         Command: {original_command}\n\n\
-         If this operation is truly needed, ask the user for explicit \
-         permission and have them run the command manually."
-    )
-}
+// NOTE: format_denial_message is now in hook module.
+// Use hook::format_denial_message() if needed.
 
-/// Print a colorful warning to stderr for human visibility.
-///
-/// This provides immediate visual feedback when a command is blocked,
-/// separate from the JSON response sent to stdout for the hook protocol.
-fn print_colorful_warning(original_command: &str, reason: &str) {
-    let stderr = io::stderr();
-    let mut handle = stderr.lock();
-
-    // Top border
-    let border = "═".repeat(72);
-    let _ = writeln!(handle, "\n{}", border.red().bold());
-
-    // Header with shield emoji and title
-    let header = format!(
-        "{}  {}",
-        "BLOCKED".white().on_red().bold(),
-        "dcg".red().bold()
-    );
-    let _ = writeln!(handle, "{header}");
-
-    // Separator
-    let _ = writeln!(handle, "{}", "─".repeat(72).red());
-
-    // Reason section
-    let _ = writeln!(handle, "{}  {}", "Reason:".yellow().bold(), reason.white());
-
-    // Command section
-    let _ = writeln!(handle);
-    let _ = writeln!(
-        handle,
-        "{}  {}",
-        "Command:".cyan().bold(),
-        original_command.bright_white().italic()
-    );
-
-    // Help section
-    let _ = writeln!(handle);
-    let _ = writeln!(
-        handle,
-        "{} {}",
-        "Tip:".green().bold(),
-        "If you need to run this command, execute it manually in a terminal.".white()
-    );
-
-    // Suggestion based on the command
-    if original_command.contains("reset") || original_command.contains("checkout") {
-        let _ = writeln!(
-            handle,
-            "     {}",
-            "Consider using 'git stash' first to save your changes.".bright_black()
-        );
-    } else if original_command.contains("clean") {
-        let _ = writeln!(
-            handle,
-            "     {}",
-            "Use 'git clean -n' first to preview what would be deleted.".bright_black()
-        );
-    } else if original_command.contains("push") && original_command.contains("force") {
-        let _ = writeln!(
-            handle,
-            "     {}",
-            "Consider using '--force-with-lease' for safer force pushing.".bright_black()
-        );
-    } else if original_command.contains("rm -rf") {
-        let _ = writeln!(
-            handle,
-            "     {}",
-            "Verify the path carefully before running rm -rf manually.".bright_black()
-        );
-    }
-
-    // Bottom border
-    let _ = writeln!(handle, "{}\n", border.red().bold());
-}
+// NOTE: print_colorful_warning is now in hook module.
+// Use hook::print_colorful_warning() if needed.
 
 /// Output a denial response and flush stdout.
 ///
@@ -448,10 +343,10 @@ fn print_colorful_warning(original_command: &str, reason: &str) {
 #[inline(never)]
 fn deny(original_command: &str, reason: &str) {
     // Print colorful warning to stderr (visible to user)
-    print_colorful_warning(original_command, reason);
+    hook::print_colorful_warning(original_command, reason, None);
 
     // Build JSON response for hook protocol (stdout)
-    let message = format_denial_message(original_command, reason);
+    let message = hook::format_denial_message(original_command, reason);
 
     let output = HookOutput {
         hook_specific_output: HookSpecificOutput {
@@ -528,6 +423,9 @@ fn main() {
         return;
     }
 
+    // Compile overrides once (precompiled regexes, no per-command compilation)
+    let compiled_overrides = config.overrides.compile();
+
     // Get enabled pack IDs early for pack-aware quick reject.
     // This is done before stdin read to minimize latency on the critical path.
     let enabled_packs: HashSet<String> = config.enabled_pack_ids();
@@ -570,25 +468,15 @@ fn main() {
         return;
     }
 
-    // Check explicit allow overrides first
-    for allow in &config.overrides.allow {
-        if allow.condition_met() {
-            if let Ok(re) = Regex::new(allow.pattern()) {
-                if re.is_match(&command).unwrap_or(false) {
-                    return;
-                }
-            }
-        }
+    // Check explicit allow overrides first (using precompiled regexes)
+    if compiled_overrides.check_allow(&command) {
+        return;
     }
 
-    // Check explicit block overrides
-    for block in &config.overrides.block {
-        if let Ok(re) = Regex::new(&block.pattern) {
-            if re.is_match(&command).unwrap_or(false) {
-                deny(&command, &block.reason);
-                return;
-            }
-        }
+    // Check explicit block overrides (using precompiled regexes)
+    if let Some(reason) = compiled_overrides.check_block(&command) {
+        deny(&command, reason);
+        return;
     }
 
     // Quick rejection: if command doesn't contain any keywords from enabled packs,
@@ -633,7 +521,6 @@ fn main() {
         if let Some(log_file) = &config.general.log_file {
             let _ = hook::log_blocked_command(log_file, &command, reason, pack_id);
         }
-        return;
     }
 
     // No pattern matched: default allow

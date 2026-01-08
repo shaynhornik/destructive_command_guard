@@ -9,6 +9,7 @@ use crate::packs::{DestructivePattern, Pack, SafePattern};
 use crate::{destructive_pattern, safe_pattern};
 
 /// Create the Services pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "system.services".to_string(),
@@ -24,14 +25,8 @@ pub fn create_pack() -> Pack {
 fn create_safe_patterns() -> Vec<SafePattern> {
     vec![
         // status commands are safe
-        safe_pattern!(
-            "systemctl-status",
-            r"systemctl\s+status"
-        ),
-        safe_pattern!(
-            "service-status",
-            r"service\s+\S+\s+status"
-        ),
+        safe_pattern!("systemctl-status", r"systemctl\s+status"),
+        safe_pattern!("service-status", r"service\s+\S+\s+status"),
         // list commands are safe
         safe_pattern!(
             "systemctl-list",
@@ -89,11 +84,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
             "shutdown will power off or restart the system."
         ),
         // reboot command
-        destructive_pattern!(
-            "reboot",
-            r"\breboot\b",
-            "reboot will restart the system."
-        ),
+        destructive_pattern!("reboot", r"\breboot\b", "reboot will restart the system."),
         // init 0/6 (shutdown/reboot)
         destructive_pattern!(
             "init-level",
@@ -102,4 +93,3 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
     ]
 }
-

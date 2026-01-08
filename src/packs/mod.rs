@@ -96,13 +96,13 @@ pub struct Pack {
     /// Unique identifier (e.g., "database.postgresql").
     pub id: PackId,
 
-    /// Human-readable name (e.g., "PostgreSQL").
+    /// Human-readable name (e.g., `PostgreSQL`).
     pub name: &'static str,
 
     /// Description of what this pack protects against.
     pub description: &'static str,
 
-    /// Keywords for quick-reject filtering (e.g., ["psql", "dropdb", "DROP"]).
+    /// Keywords for quick-reject filtering (e.g., `["psql", "dropdb", "DROP"]`).
     /// Commands without any of these keywords skip pattern matching for this pack.
     pub keywords: &'static [&'static str],
 
@@ -116,6 +116,7 @@ pub struct Pack {
 impl Pack {
     /// Check if a command contains any of this pack's keywords.
     /// Returns false if the command doesn't contain any keywords (quick reject).
+    #[must_use]
     pub fn might_match(&self, cmd: &str) -> bool {
         if self.keywords.is_empty() {
             return true; // No keywords = always check patterns
@@ -128,6 +129,7 @@ impl Pack {
     }
 
     /// Check if a command matches any safe pattern.
+    #[must_use]
     pub fn matches_safe(&self, cmd: &str) -> bool {
         self.safe_patterns
             .iter()
@@ -136,6 +138,7 @@ impl Pack {
 
     /// Check if a command matches any destructive pattern.
     /// Returns the matched pattern's reason and name if found.
+    #[must_use]
     pub fn matches_destructive(&self, cmd: &str) -> Option<DestructiveMatch> {
         self.destructive_patterns
             .iter()
@@ -148,6 +151,7 @@ impl Pack {
 
     /// Check a command against this pack.
     /// Returns Some(DestructiveMatch) if blocked, None if allowed.
+    #[must_use]
     pub fn check(&self, cmd: &str) -> Option<DestructiveMatch> {
         // Quick reject if no keywords match
         if !self.might_match(cmd) {
@@ -188,7 +192,8 @@ pub struct CheckResult {
 
 impl CheckResult {
     /// Create an "allowed" result.
-    pub fn allowed() -> Self {
+    #[must_use]
+    pub const fn allowed() -> Self {
         Self {
             blocked: false,
             reason: None,
@@ -198,6 +203,7 @@ impl CheckResult {
     }
 
     /// Create a "blocked" result with pattern identity.
+    #[must_use]
     pub fn blocked(reason: &str, pack_id: &str, pattern_name: Option<&str>) -> Self {
         Self {
             blocked: true,
@@ -242,6 +248,7 @@ impl PackRegistry {
     }
 
     /// Create a new registry with all built-in packs.
+    #[must_use]
     pub fn new() -> Self {
         let mut registry = Self {
             packs: HashMap::new(),
@@ -295,21 +302,25 @@ impl PackRegistry {
     }
 
     /// Get a pack by ID.
+    #[must_use]
     pub fn get(&self, id: &str) -> Option<&Pack> {
         self.packs.get(id)
     }
 
     /// Get all pack IDs.
+    #[must_use]
     pub fn all_pack_ids(&self) -> Vec<&PackId> {
         self.packs.keys().collect()
     }
 
     /// Get all categories.
+    #[must_use]
     pub fn all_categories(&self) -> Vec<&String> {
         self.categories.keys().collect()
     }
 
     /// Get pack IDs in a category.
+    #[must_use]
     pub fn packs_in_category(&self, category: &str) -> Vec<&PackId> {
         self.categories
             .get(category)
@@ -318,6 +329,7 @@ impl PackRegistry {
     }
 
     /// Expand enabled pack IDs to include sub-packs when a category is enabled.
+    #[must_use]
     pub fn expand_enabled(&self, enabled: &HashSet<String>) -> HashSet<String> {
         let mut expanded = HashSet::new();
 
@@ -348,10 +360,11 @@ impl PackRegistry {
     /// 5. **Tier 5 (kubernetes)**: `kubernetes.*` - kubectl, helm, kustomize
     /// 6. **Tier 6 (containers)**: `containers.*` - docker, compose, podman
     /// 7. **Tier 7 (database)**: `database.*` - postgresql, mysql, etc.
-    /// 8. **Tier 8 (package_managers)**: package manager protections
-    /// 9. **Tier 9 (strict_git)**: extra git paranoia
+    /// 8. **Tier 8 (`package_managers`)**: package manager protections
+    /// 9. **Tier 9 (`strict_git`)**: extra git paranoia
     ///
     /// Within each tier, packs are sorted lexicographically by ID.
+    #[must_use]
     pub fn expand_enabled_ordered(&self, enabled: &HashSet<String>) -> Vec<String> {
         let expanded = self.expand_enabled(enabled);
 
@@ -398,6 +411,7 @@ impl PackRegistry {
     /// - `reason`: the human-readable explanation (if blocked)
     /// - `pack_id`: which pack blocked it (if blocked)
     /// - `pattern_name`: the specific pattern that matched (if available and blocked)
+    #[must_use]
     pub fn check_command(&self, cmd: &str, enabled_packs: &HashSet<String>) -> CheckResult {
         // Expand category IDs to include all sub-packs in deterministic order
         let ordered_packs = self.expand_enabled_ordered(enabled_packs);
@@ -414,6 +428,7 @@ impl PackRegistry {
     }
 
     /// List all packs with their status.
+    #[must_use]
     pub fn list_packs(&self, enabled: &HashSet<String>) -> Vec<PackInfo> {
         let expanded = self.expand_enabled(enabled);
 
@@ -537,7 +552,7 @@ pub fn pack_aware_quick_reject(cmd: &str, enabled_keywords: &[&str]) -> bool {
 mod tests {
     use super::*;
 
-    /// Test that pack_tier returns correct tiers for all known categories.
+    /// Test that `pack_tier` returns correct tiers for all known categories.
     #[test]
     fn pack_tier_ordering() {
         // Core should be highest priority (tier 1)
@@ -573,7 +588,7 @@ mod tests {
         assert_eq!(PackRegistry::pack_tier("unknown.pack"), 10);
     }
 
-    /// Test that expand_enabled_ordered returns packs in deterministic order.
+    /// Test that `expand_enabled_ordered` returns packs in deterministic order.
     #[test]
     fn expand_enabled_ordered_is_deterministic() {
         let mut enabled = HashSet::new();
@@ -594,7 +609,7 @@ mod tests {
         }
     }
 
-    /// Test that expand_enabled_ordered sorts by tier then lexicographically.
+    /// Test that `expand_enabled_ordered` sorts by tier then lexicographically.
     #[test]
     fn expand_enabled_ordered_respects_tier_ordering() {
         let mut enabled = HashSet::new();
@@ -627,7 +642,7 @@ mod tests {
         );
     }
 
-    /// Test that expand_enabled_ordered sorts lexicographically within tier.
+    /// Test that `expand_enabled_ordered` sorts lexicographically within tier.
     #[test]
     fn expand_enabled_ordered_sorts_within_tier() {
         let mut enabled = HashSet::new();
@@ -651,7 +666,7 @@ mod tests {
         );
     }
 
-    /// Test that check_command returns consistent attribution across runs.
+    /// Test that `check_command` returns consistent attribution across runs.
     /// This is the key regression test for deterministic pack evaluation.
     #[test]
     fn check_command_attribution_is_deterministic() {
@@ -734,7 +749,7 @@ mod tests {
         );
     }
 
-    /// Test that check_command returns pattern_name when available.
+    /// Test that `check_command` returns `pattern_name` when available.
     #[test]
     fn check_command_returns_pattern_name() {
         let mut enabled = HashSet::new();
@@ -758,7 +773,7 @@ mod tests {
         );
     }
 
-    /// Test that DestructiveMatch contains both reason and name.
+    /// Test that `DestructiveMatch` contains both reason and name.
     #[test]
     fn destructive_match_contains_metadata() {
         let docker_pack = REGISTRY

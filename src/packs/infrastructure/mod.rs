@@ -1,9 +1,9 @@
-//! Infrastructure pack - protections for IaC tool commands.
+//! Infrastructure pack - protections for `IaC` tool commands.
 //!
 //! This pack provides protection against destructive infrastructure operations:
-//! - Terraform (terraform destroy, taint)
-//! - Ansible (with dangerous flags)
-//! - Pulumi (pulumi destroy)
+//! - `Terraform` (`terraform destroy`, `terraform taint`)
+//! - `Ansible` (with dangerous flags)
+//! - `Pulumi` (`pulumi destroy`)
 
 pub mod ansible;
 pub mod pulumi;

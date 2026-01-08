@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# End-to-End Test Script for git_safety_guard
+# End-to-End Test Script for dcg
 #
 # This script tests the hook binary with real-world command scenarios,
 # verifying both blocking and allowing behavior with detailed logging.
@@ -10,7 +10,7 @@
 #
 # Options:
 #   --verbose   Show detailed output for each test
-#   --binary    Path to git_safety_guard binary (default: searches PATH)
+#   --binary    Path to dcg binary (default: searches PATH)
 #
 # Exit codes:
 #   0  All tests passed
@@ -51,7 +51,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --verbose, -v   Show detailed output for each test"
-            echo "  --binary, -b    Path to git_safety_guard binary"
+            echo "  --binary, -b    Path to dcg binary"
             echo "  --help, -h      Show this help message"
             exit 0
             ;;
@@ -64,20 +64,20 @@ done
 
 # Find binary
 if [[ -z "$BINARY" ]]; then
-    if command -v git_safety_guard &> /dev/null; then
-        BINARY="git_safety_guard"
-    elif [[ -f "./target/release/git_safety_guard" ]]; then
-        BINARY="./target/release/git_safety_guard"
-    elif [[ -f "./target/debug/git_safety_guard" ]]; then
-        BINARY="./target/debug/git_safety_guard"
+    if command -v dcg &> /dev/null; then
+        BINARY="dcg"
+    elif [[ -f "./target/release/dcg" ]]; then
+        BINARY="./target/release/dcg"
+    elif [[ -f "./target/debug/dcg" ]]; then
+        BINARY="./target/debug/dcg"
     else
-        echo -e "${RED}Error: git_safety_guard binary not found${NC}"
+        echo -e "${RED}Error: dcg binary not found${NC}"
         echo "Run 'cargo build --release' first or specify --binary PATH"
         exit 2
     fi
 fi
 
-echo -e "${BOLD}${BLUE}git_safety_guard End-to-End Test Suite${NC}"
+echo -e "${BOLD}${BLUE}dcg End-to-End Test Suite${NC}"
 echo -e "${CYAN}Binary: ${BINARY}${NC}"
 echo ""
 

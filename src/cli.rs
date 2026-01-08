@@ -1,17 +1,16 @@
 //! CLI argument parsing and command handling.
 //!
-//! This module provides the command-line interface for dcg (destructive_command_guard),
+//! This module provides the command-line interface for dcg (`destructive_command_guard`),
 //! including subcommands for configuration management and pack information.
 
 use clap::{Parser, Subcommand};
-use std::collections::HashSet;
 
 use crate::config::Config;
 use crate::packs::REGISTRY;
 
 /// High-performance Claude Code hook for blocking destructive commands.
 ///
-/// dcg (destructive_command_guard) protects against accidental execution of
+/// dcg (`destructive_command_guard`) protects against accidental execution of
 /// destructive commands by AI coding agents. It blocks dangerous git commands,
 /// filesystem operations, database queries, and more.
 #[derive(Parser, Debug)]
@@ -102,13 +101,18 @@ pub enum Command {
     ShowConfig,
 }
 
-/// Run the CLI command
+/// Run the CLI command.
+///
+/// # Errors
+///
+/// Returns an error when no subcommand is provided (hook mode), or when a
+/// subcommand that performs I/O fails.
 pub fn run_command(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load();
 
     match cli.command {
         Some(Command::Doctor { fix }) => {
-            doctor(fix)?;
+            doctor(fix);
         }
         Some(Command::Install { force }) => {
             install_hook(force)?;
@@ -122,7 +126,10 @@ pub fn run_command(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Some(Command::PackInfo { pack_id, patterns }) => {
             pack_info(&pack_id, patterns)?;
         }
-        Some(Command::TestCommand { command, with_packs }) => {
+        Some(Command::TestCommand {
+            command,
+            with_packs,
+        }) => {
             test_command(&config, &command, with_packs);
         }
         Some(Command::Init { output, force }) => {
@@ -143,21 +150,22 @@ pub fn run_command(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 /// List all packs and their status
 fn list_packs(config: &Config, enabled_only: bool, verbose: bool) {
-    let enabled_packs: HashSet<String> = config.enabled_pack_ids().into_iter().collect();
+    let enabled_packs = config.enabled_pack_ids();
     let infos = REGISTRY.list_packs(&enabled_packs);
 
     println!("Available packs:");
     println!();
 
     // Group by category
-    let mut by_category: std::collections::BTreeMap<&str, Vec<_>> = std::collections::BTreeMap::new();
+    let mut by_category: std::collections::BTreeMap<&str, Vec<_>> =
+        std::collections::BTreeMap::new();
     for info in &infos {
         let category = info.id.split('.').next().unwrap_or(&info.id);
         by_category.entry(category).or_default().push(info);
     }
 
     for (category, packs) in by_category {
-        println!("  {}:", category);
+        println!("  {category}:");
         for info in packs {
             if enabled_only && !info.enabled {
                 continue;
@@ -189,7 +197,7 @@ fn list_packs(config: &Config, enabled_only: bool, verbose: bool) {
 fn pack_info(pack_id: &str, show_patterns: bool) -> Result<(), Box<dyn std::error::Error>> {
     let pack = REGISTRY
         .get(pack_id)
-        .ok_or_else(|| format!("Pack not found: {}", pack_id))?;
+        .ok_or_else(|| format!("Pack not found: {pack_id}"))?;
 
     println!("Pack: {}", pack.name);
     println!("ID: {}", pack.id);
@@ -198,7 +206,10 @@ fn pack_info(pack_id: &str, show_patterns: bool) -> Result<(), Box<dyn std::erro
     println!();
     println!("Patterns:");
     println!("  Safe patterns: {}", pack.safe_patterns.len());
-    println!("  Destructive patterns: {}", pack.destructive_patterns.len());
+    println!(
+        "  Destructive patterns: {}",
+        pack.destructive_patterns.len()
+    );
 
     if show_patterns {
         println!();
@@ -221,7 +232,7 @@ fn pack_info(pack_id: &str, show_patterns: bool) -> Result<(), Box<dyn std::erro
 
 /// Test a command against the configured packs
 fn test_command(config: &Config, command: &str, extra_packs: Option<Vec<String>>) {
-    let mut enabled: HashSet<String> = config.enabled_pack_ids().into_iter().collect();
+    let mut enabled = config.enabled_pack_ids();
 
     // Add extra packs if specified
     if let Some(packs) = extra_packs {
@@ -232,7 +243,7 @@ fn test_command(config: &Config, command: &str, extra_packs: Option<Vec<String>>
 
     let result = REGISTRY.check_command(command, &enabled);
 
-    println!("Command: {}", command);
+    println!("Command: {command}");
     println!();
 
     if result.blocked {
@@ -252,11 +263,9 @@ fn init_config(output: Option<String>, force: bool) -> Result<(), Box<dyn std::e
         Some(path) => {
             let path = std::path::Path::new(&path);
             if path.exists() && !force {
-                return Err(format!(
-                    "File exists: {}. Use --force to overwrite.",
-                    path.display()
-                )
-                .into());
+                return Err(
+                    format!("File exists: {}. Use --force to overwrite.", path.display()).into(),
+                );
             }
 
             // Create parent directories if needed
@@ -268,7 +277,7 @@ fn init_config(output: Option<String>, force: bool) -> Result<(), Box<dyn std::e
             println!("Configuration written to: {}", path.display());
         }
         None => {
-            println!("{}", sample);
+            println!("{sample}");
         }
     }
 
@@ -286,17 +295,17 @@ fn show_config(config: &Config) {
     println!();
     println!("Enabled packs:");
     for pack in config.enabled_pack_ids() {
-        println!("  - {}", pack);
+        println!("  - {pack}");
     }
     println!();
     println!("Disabled packs:");
     for pack in &config.packs.disabled {
-        println!("  - {}", pack);
+        println!("  - {pack}");
     }
 }
 
 /// Check installation, configuration, and hook registration
-fn doctor(fix: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn doctor(fix: bool) {
     use colored::Colorize;
 
     println!("{}", "dcg doctor".green().bold());
@@ -348,7 +357,7 @@ fn doctor(fix: bool) -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(e) => {
             println!("{}", "ERROR".red());
-            println!("  {}", e);
+            println!("  {e}");
         }
     }
 
@@ -379,14 +388,33 @@ fn doctor(fix: bool) -> Result<(), Box<dyn std::error::Error>> {
             "{} issue(s) found{}",
             issues.to_string().red().bold(),
             if fix {
-                format!(", {} fixed", fixed)
+                format!(", {fixed} fixed")
             } else {
                 String::new()
             }
         );
     }
+}
 
-    Ok(())
+fn is_dcg_command(cmd: &str) -> bool {
+    cmd == "dcg" || cmd.ends_with("/dcg")
+}
+
+fn is_dcg_hook_entry(entry: &serde_json::Value) -> bool {
+    entry
+        .get("matcher")
+        .and_then(|m| m.as_str())
+        .is_some_and(|m| m == "Bash")
+        && entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .is_some_and(|hooks| {
+                hooks.iter().any(|hook| {
+                    hook.get("command")
+                        .and_then(|c| c.as_str())
+                        .is_some_and(is_dcg_command)
+                })
+            })
 }
 
 /// Install the hook into Claude Code settings
@@ -411,21 +439,8 @@ fn install_hook(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     let hook_exists = settings
         .get("hooks")
         .and_then(|h| h.get("PreToolUse"))
-        .map(|arr| {
-            arr.as_array().map_or(false, |a| {
-                a.iter().any(|h| {
-                    h.get("matcher").and_then(|m| m.as_str()) == Some("Bash")
-                        && h.get("hooks").and_then(|h| h.as_array()).map_or(false, |hooks| {
-                            hooks.iter().any(|hook| {
-                                hook.get("command").and_then(|c| c.as_str()).map_or(false, |cmd| {
-                                    cmd == "dcg" || cmd.ends_with("/dcg")
-                                })
-                            })
-                        })
-                })
-            })
-        })
-        .unwrap_or(false);
+        .and_then(|arr| arr.as_array())
+        .is_some_and(|a| a.iter().any(is_dcg_hook_entry));
 
     if hook_exists && !force {
         println!("{}", "Hook already installed!".yellow());
@@ -458,17 +473,7 @@ fn install_hook(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     // Remove existing dcg hooks if force
     if force {
         if let Some(arr) = pre_tool_use.as_array_mut() {
-            arr.retain(|h| {
-                let is_dcg = h.get("matcher").and_then(|m| m.as_str()) == Some("Bash")
-                    && h.get("hooks").and_then(|h| h.as_array()).map_or(false, |hooks| {
-                        hooks.iter().any(|hook| {
-                            hook.get("command").and_then(|c| c.as_str()).map_or(false, |cmd| {
-                                cmd == "dcg" || cmd.ends_with("/dcg")
-                            })
-                        })
-                    });
-                !is_dcg
-            });
+            arr.retain(|h| !is_dcg_hook_entry(h));
         }
     }
 
@@ -484,7 +489,10 @@ fn install_hook(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "Hook installed successfully!".green().bold());
     println!("Settings updated: {}", settings_path.display());
     println!();
-    println!("{}", "Restart Claude Code for the changes to take effect.".yellow());
+    println!(
+        "{}",
+        "Restart Claude Code for the changes to take effect.".yellow()
+    );
 
     Ok(())
 }
@@ -510,17 +518,7 @@ fn uninstall_hook(purge: bool) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(pre_tool_use) = hooks.get_mut("PreToolUse") {
             if let Some(arr) = pre_tool_use.as_array_mut() {
                 let before = arr.len();
-                arr.retain(|h| {
-                    let is_dcg = h.get("matcher").and_then(|m| m.as_str()) == Some("Bash")
-                        && h.get("hooks").and_then(|h| h.as_array()).map_or(false, |hooks| {
-                            hooks.iter().any(|hook| {
-                                hook.get("command").and_then(|c| c.as_str()).map_or(false, |cmd| {
-                                    cmd == "dcg" || cmd.ends_with("/dcg")
-                                })
-                            })
-                        });
-                    !is_dcg
-                });
+                arr.retain(|h| !is_dcg_hook_entry(h));
                 removed = arr.len() < before;
             }
         }
@@ -545,7 +543,10 @@ fn uninstall_hook(purge: bool) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!();
-    println!("{}", "Restart Claude Code for the changes to take effect.".yellow());
+    println!(
+        "{}",
+        "Restart Claude Code for the changes to take effect.".yellow()
+    );
 
     Ok(())
 }
@@ -575,11 +576,7 @@ fn which_dcg() -> Option<std::path::PathBuf> {
     std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths).find_map(|dir| {
             let path = dir.join("dcg");
-            if path.is_file() {
-                Some(path)
-            } else {
-                None
-            }
+            if path.is_file() { Some(path) } else { None }
         })
     })
 }
@@ -597,21 +594,8 @@ fn check_hook_registered() -> Result<bool, Box<dyn std::error::Error>> {
     let registered = settings
         .get("hooks")
         .and_then(|h| h.get("PreToolUse"))
-        .map(|arr| {
-            arr.as_array().map_or(false, |a| {
-                a.iter().any(|h| {
-                    h.get("matcher").and_then(|m| m.as_str()) == Some("Bash")
-                        && h.get("hooks").and_then(|h| h.as_array()).map_or(false, |hooks| {
-                            hooks.iter().any(|hook| {
-                                hook.get("command").and_then(|c| c.as_str()).map_or(false, |cmd| {
-                                    cmd == "dcg" || cmd.ends_with("/dcg")
-                                })
-                            })
-                        })
-                })
-            })
-        })
-        .unwrap_or(false);
+        .and_then(|arr| arr.as_array())
+        .is_some_and(|a| a.iter().any(is_dcg_hook_entry));
 
     Ok(registered)
 }

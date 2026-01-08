@@ -1,4 +1,4 @@
-//! SQLite patterns - protections against destructive sqlite3 commands.
+//! `SQLite` patterns - protections against destructive sqlite3 commands.
 //!
 //! This includes patterns for:
 //! - DROP TABLE/DATABASE commands
@@ -8,7 +8,8 @@
 use crate::packs::{DestructivePattern, Pack, SafePattern};
 use crate::{destructive_pattern, safe_pattern};
 
-/// Create the SQLite pack.
+/// Create the `SQLite` pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "database.sqlite".to_string(),
@@ -24,15 +25,9 @@ pub fn create_pack() -> Pack {
 fn create_safe_patterns() -> Vec<SafePattern> {
     vec![
         // DROP with IF EXISTS is safer
-        safe_pattern!(
-            "drop-if-exists",
-            r"(?i)DROP\s+TABLE\s+IF\s+EXISTS"
-        ),
+        safe_pattern!("drop-if-exists", r"(?i)DROP\s+TABLE\s+IF\s+EXISTS"),
         // SELECT queries are safe
-        safe_pattern!(
-            "select-query",
-            r"(?i)^\s*SELECT\s+"
-        ),
+        safe_pattern!("select-query", r"(?i)^\s*SELECT\s+"),
         // .schema, .tables, .dump are read-only
         safe_pattern!("dot-schema", r"\.schema"),
         safe_pattern!("dot-tables", r"\.tables"),
@@ -72,4 +67,3 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
     ]
 }
-

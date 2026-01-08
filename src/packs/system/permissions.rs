@@ -10,6 +10,7 @@ use crate::packs::{DestructivePattern, Pack, SafePattern};
 use crate::{destructive_pattern, safe_pattern};
 
 /// Create the Permissions pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "system.permissions".to_string(),
@@ -86,4 +87,3 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
     ]
 }
-

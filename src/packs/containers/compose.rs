@@ -9,6 +9,7 @@ use crate::packs::{DestructivePattern, Pack, SafePattern};
 use crate::{destructive_pattern, safe_pattern};
 
 /// Create the Docker Compose pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "containers.compose".to_string(),
@@ -24,17 +25,29 @@ pub fn create_pack() -> Pack {
 fn create_safe_patterns() -> Vec<SafePattern> {
     vec![
         // config validation is safe
-        safe_pattern!("compose-config", r"(?:docker-compose|docker\s+compose)\s+config"),
+        safe_pattern!(
+            "compose-config",
+            r"(?:docker-compose|docker\s+compose)\s+config"
+        ),
         // ps is safe (read-only)
         safe_pattern!("compose-ps", r"(?:docker-compose|docker\s+compose)\s+ps"),
         // logs is safe
-        safe_pattern!("compose-logs", r"(?:docker-compose|docker\s+compose)\s+logs"),
+        safe_pattern!(
+            "compose-logs",
+            r"(?:docker-compose|docker\s+compose)\s+logs"
+        ),
         // up is generally safe (creates)
         safe_pattern!("compose-up", r"(?:docker-compose|docker\s+compose)\s+up"),
         // build is safe
-        safe_pattern!("compose-build", r"(?:docker-compose|docker\s+compose)\s+build"),
+        safe_pattern!(
+            "compose-build",
+            r"(?:docker-compose|docker\s+compose)\s+build"
+        ),
         // pull is safe
-        safe_pattern!("compose-pull", r"(?:docker-compose|docker\s+compose)\s+pull"),
+        safe_pattern!(
+            "compose-pull",
+            r"(?:docker-compose|docker\s+compose)\s+pull"
+        ),
         // down without -v is less destructive
         safe_pattern!(
             "compose-down-no-volumes",
@@ -71,4 +84,3 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
     ]
 }
-

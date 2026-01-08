@@ -8,6 +8,7 @@ use crate::packs::{DestructivePattern, Pack, SafePattern};
 use crate::{destructive_pattern, safe_pattern};
 
 /// Create the Ansible pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "infrastructure.ansible".to_string(),
@@ -27,11 +28,20 @@ fn create_safe_patterns() -> Vec<SafePattern> {
         // --diff shows changes (safe)
         safe_pattern!("ansible-diff", r"ansible(?:-playbook)?\s+.*--diff"),
         // --list-hosts just lists (safe)
-        safe_pattern!("ansible-list-hosts", r"ansible(?:-playbook)?\s+.*--list-hosts"),
+        safe_pattern!(
+            "ansible-list-hosts",
+            r"ansible(?:-playbook)?\s+.*--list-hosts"
+        ),
         // --list-tasks just lists (safe)
-        safe_pattern!("ansible-list-tasks", r"ansible(?:-playbook)?\s+.*--list-tasks"),
+        safe_pattern!(
+            "ansible-list-tasks",
+            r"ansible(?:-playbook)?\s+.*--list-tasks"
+        ),
         // --syntax-check is safe
-        safe_pattern!("ansible-syntax", r"ansible(?:-playbook)?\s+.*--syntax-check"),
+        safe_pattern!(
+            "ansible-syntax",
+            r"ansible(?:-playbook)?\s+.*--syntax-check"
+        ),
         // ansible-inventory is safe
         safe_pattern!("ansible-inventory", r"ansible-inventory"),
         // ansible-doc is safe
@@ -69,4 +79,3 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
     ]
 }
-

@@ -1,4 +1,4 @@
-//! MongoDB patterns - protections against destructive mongo commands.
+//! `MongoDB` patterns - protections against destructive mongo commands.
 //!
 //! This includes patterns for:
 //! - dropDatabase/dropCollection commands
@@ -8,14 +8,21 @@
 use crate::packs::{DestructivePattern, Pack, SafePattern};
 use crate::{destructive_pattern, safe_pattern};
 
-/// Create the MongoDB pack.
+/// Create the `MongoDB` pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "database.mongodb".to_string(),
         name: "MongoDB",
         description: "Protects against destructive MongoDB operations like dropDatabase, \
                       dropCollection, and remove without criteria",
-        keywords: &["mongo", "mongosh", "dropDatabase", "dropCollection", "deleteMany"],
+        keywords: &[
+            "mongo",
+            "mongosh",
+            "dropDatabase",
+            "dropCollection",
+            "deleteMany",
+        ],
         safe_patterns: create_safe_patterns(),
         destructive_patterns: create_destructive_patterns(),
     }
@@ -70,4 +77,3 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
     ]
 }
-

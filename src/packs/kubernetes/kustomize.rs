@@ -8,6 +8,7 @@ use crate::packs::{DestructivePattern, Pack, SafePattern};
 use crate::{destructive_pattern, safe_pattern};
 
 /// Create the Kustomize pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "kubernetes.kustomize".to_string(),
@@ -61,4 +62,3 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
     ]
 }
-

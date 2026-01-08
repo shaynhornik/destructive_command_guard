@@ -10,6 +10,7 @@ use crate::packs::{DestructivePattern, Pack, SafePattern};
 use crate::{destructive_pattern, safe_pattern};
 
 /// Create the Package Managers pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "package_managers".to_string(),
@@ -39,7 +40,10 @@ fn create_safe_patterns() -> Vec<SafePattern> {
         // pip list/show are safe
         safe_pattern!("pip-list", r"pip\s+(?:list|show|freeze)\b"),
         // cargo build/test/check are safe
-        safe_pattern!("cargo-safe", r"cargo\s+(?:build|test|check|clippy|fmt|doc|bench)\b"),
+        safe_pattern!(
+            "cargo-safe",
+            r"cargo\s+(?:build|test|check|clippy|fmt|doc|bench)\b"
+        ),
         // apt list/show are safe
         safe_pattern!("apt-list", r"apt\s+(?:list|show|search)\b"),
         safe_pattern!("apt-get-list", r"apt-get\s+(?:update|upgrade)(?!\s+.*-y)"),
@@ -123,4 +127,3 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
     ]
 }
-

@@ -85,7 +85,8 @@ pub struct EvaluationResult {
 impl EvaluationResult {
     /// Create an "allowed" result.
     #[inline]
-    pub fn allowed() -> Self {
+    #[must_use]
+    pub const fn allowed() -> Self {
         Self {
             decision: EvaluationDecision::Allow,
             pattern_info: None,
@@ -94,7 +95,8 @@ impl EvaluationResult {
 
     /// Create a "denied" result from config override.
     #[inline]
-    pub fn denied_by_config(reason: String) -> Self {
+    #[must_use]
+    pub const fn denied_by_config(reason: String) -> Self {
         Self {
             decision: EvaluationDecision::Deny,
             pattern_info: Some(PatternMatch {
@@ -108,6 +110,7 @@ impl EvaluationResult {
 
     /// Create a "denied" result from legacy pattern.
     #[inline]
+    #[must_use]
     pub fn denied_by_legacy(reason: &str) -> Self {
         Self {
             decision: EvaluationDecision::Deny,
@@ -122,6 +125,7 @@ impl EvaluationResult {
 
     /// Create a "denied" result from a pack.
     #[inline]
+    #[must_use]
     pub fn denied_by_pack(pack_id: &str, reason: &str) -> Self {
         Self {
             decision: EvaluationDecision::Deny,
@@ -136,6 +140,7 @@ impl EvaluationResult {
 
     /// Create a "denied" result from a pack with pattern name.
     #[inline]
+    #[must_use]
     pub fn denied_by_pack_pattern(pack_id: &str, pattern_name: &str, reason: &str) -> Self {
         Self {
             decision: EvaluationDecision::Deny,
@@ -150,22 +155,26 @@ impl EvaluationResult {
 
     /// Check if the command was allowed.
     #[inline]
+    #[must_use]
     pub fn is_allowed(&self) -> bool {
         self.decision == EvaluationDecision::Allow
     }
 
     /// Check if the command was denied.
     #[inline]
+    #[must_use]
     pub fn is_denied(&self) -> bool {
         self.decision == EvaluationDecision::Deny
     }
 
     /// Get the reason for denial (if denied).
+    #[must_use]
     pub fn reason(&self) -> Option<&str> {
         self.pattern_info.as_ref().map(|p| p.reason.as_str())
     }
 
     /// Get the pack ID that blocked (if denied by a pack).
+    #[must_use]
     pub fn pack_id(&self) -> Option<&str> {
         self.pattern_info
             .as_ref()
@@ -255,7 +264,7 @@ pub fn evaluate_command(
 
 /// Evaluate a command with legacy pattern support.
 ///
-/// This version includes legacy SAFE_PATTERNS and DESTRUCTIVE_PATTERNS checking.
+/// This version includes legacy `SAFE_PATTERNS` and `DESTRUCTIVE_PATTERNS` checking.
 /// It's intended to be used by the main hook entrypoint until the legacy patterns
 /// are migrated to the pack system (git_safety_guard-99e.3.4).
 ///

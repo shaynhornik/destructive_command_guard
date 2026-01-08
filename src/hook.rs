@@ -36,7 +36,7 @@ pub struct HookOutput<'a> {
 /// Hook-specific output with decision and reason.
 #[derive(Debug, Serialize)]
 pub struct HookSpecificOutput<'a> {
-    /// Always "PreToolUse" for this hook.
+    /// Always "`PreToolUse`" for this hook.
     #[serde(rename = "hookEventName")]
     pub hook_event_name: &'static str,
 
@@ -74,21 +74,34 @@ pub enum HookResult {
     ParseError,
 }
 
+/// Error type for reading and parsing hook input.
+#[derive(Debug)]
+pub enum HookReadError {
+    /// Failed to read from stdin.
+    Io(io::Error),
+    /// Failed to parse JSON input.
+    Json(serde_json::Error),
+}
+
 /// Read and parse hook input from stdin.
-pub fn read_hook_input() -> Result<HookInput, ()> {
+///
+/// # Errors
+///
+/// Returns [`HookReadError::Io`] if stdin cannot be read, or [`HookReadError::Json`]
+/// if the input is not valid hook JSON.
+pub fn read_hook_input() -> Result<HookInput, HookReadError> {
     let mut input = String::with_capacity(256);
     {
         let stdin = io::stdin();
         let mut handle = stdin.lock();
-        if handle.read_line(&mut input).is_err() {
-            return Err(());
-        }
+        handle.read_line(&mut input).map_err(HookReadError::Io)?;
     }
 
-    serde_json::from_str(&input).map_err(|_| ())
+    serde_json::from_str(&input).map_err(HookReadError::Json)
 }
 
 /// Extract the command string from hook input.
+#[must_use]
 pub fn extract_command(input: &HookInput) -> Option<String> {
     // Only process Bash tool invocations
     if input.tool_name.as_deref() != Some("Bash") {
@@ -112,6 +125,7 @@ pub fn configure_colors() {
 }
 
 /// Format the denial message for the JSON output (plain text).
+#[must_use]
 pub fn format_denial_message(command: &str, reason: &str) -> String {
     format!(
         "BLOCKED by dcg\n\n\
@@ -203,6 +217,11 @@ fn print_contextual_suggestion(handle: &mut io::StderrLock<'_>, command: &str) {
 }
 
 /// Output a denial response to stdout (JSON for hook protocol).
+///
+/// # Panics
+///
+/// Panics if writing the denial JSON to stdout fails. This indicates an
+/// unrecoverable I/O error.
 #[cold]
 #[inline(never)]
 pub fn output_denial(command: &str, reason: &str, pack: Option<&str>) {
@@ -228,6 +247,11 @@ pub fn output_denial(command: &str, reason: &str, pack: Option<&str>) {
 }
 
 /// Log a blocked command to a file (if logging is enabled).
+///
+/// # Errors
+///
+/// Returns any I/O errors encountered while creating directories or appending
+/// to the log file.
 pub fn log_blocked_command(
     log_file: &str,
     command: &str,
@@ -238,9 +262,10 @@ pub fn log_blocked_command(
 
     // Expand ~ in path
     let path = if log_file.starts_with("~/") {
-        dirs::home_dir()
-            .map(|h| h.join(&log_file[2..]))
-            .unwrap_or_else(|| std::path::PathBuf::from(log_file))
+        dirs::home_dir().map_or_else(
+            || std::path::PathBuf::from(log_file),
+            |h| h.join(&log_file[2..]),
+        )
     } else {
         std::path::PathBuf::from(log_file)
     };

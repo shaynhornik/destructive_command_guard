@@ -10,6 +10,7 @@ use crate::packs::{DestructivePattern, Pack, SafePattern};
 use crate::{destructive_pattern, safe_pattern};
 
 /// Create the AWS pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "cloud.aws".to_string(),
@@ -37,10 +38,7 @@ fn create_safe_patterns() -> Vec<SafePattern> {
         // sts get-caller-identity is safe
         safe_pattern!("sts-identity", r"aws\s+sts\s+get-caller-identity"),
         // cloudformation describe/list
-        safe_pattern!(
-            "cfn-describe",
-            r"aws\s+cloudformation\s+(?:describe|list)-"
-        ),
+        safe_pattern!("cfn-describe", r"aws\s+cloudformation\s+(?:describe|list)-"),
         // ecr get-login-password is safe
         safe_pattern!("ecr-login", r"aws\s+ecr\s+get-login"),
     ]
@@ -116,4 +114,3 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
     ]
 }
-

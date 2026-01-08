@@ -62,5 +62,5 @@ pub use evaluator::{
     EvaluationDecision, EvaluationResult, LegacyDestructivePattern, LegacySafePattern, MatchSource,
     PatternMatch, evaluate_command, evaluate_command_with_legacy,
 };
-pub use hook::{HookInput, HookOutput, HookResult};
+pub use hook::{HookInput, HookOutput, HookResult, HookSpecificOutput};
 pub use packs::{Pack, PackId, PackRegistry};

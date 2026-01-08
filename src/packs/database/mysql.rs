@@ -1,7 +1,8 @@
-//! MySQL/MariaDB patterns.
+//! `MySQL`/`MariaDB` patterns.
 
 use crate::packs::{DestructivePattern, Pack, SafePattern};
 
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "database.mysql".to_string(),
@@ -13,10 +14,10 @@ pub fn create_pack() -> Pack {
     }
 }
 
-fn create_safe_patterns() -> Vec<SafePattern> {
-    vec![]
+const fn create_safe_patterns() -> Vec<SafePattern> {
+    Vec::new()
 }
 
-fn create_destructive_patterns() -> Vec<DestructivePattern> {
-    vec![]
+const fn create_destructive_patterns() -> Vec<DestructivePattern> {
+    Vec::new()
 }

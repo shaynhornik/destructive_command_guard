@@ -8,6 +8,7 @@ use crate::packs::{DestructivePattern, Pack, SafePattern};
 use crate::{destructive_pattern, safe_pattern};
 
 /// Create the core filesystem pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "core.filesystem".to_string(),
@@ -19,6 +20,7 @@ pub fn create_pack() -> Pack {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn create_safe_patterns() -> Vec<SafePattern> {
     vec![
         // rm -rf in /tmp (combined flags)
@@ -178,4 +180,3 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
     ]
 }
-

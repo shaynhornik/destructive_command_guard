@@ -10,6 +10,7 @@ use crate::packs::{DestructivePattern, Pack, SafePattern};
 use crate::{destructive_pattern, safe_pattern};
 
 /// Create the Docker pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "containers.docker".to_string(),
@@ -103,4 +104,3 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
     ]
 }
-

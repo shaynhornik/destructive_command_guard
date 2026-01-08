@@ -1,15 +1,16 @@
-//! PostgreSQL patterns - protections against destructive psql/pg commands.
+//! `PostgreSQL` patterns - protections against destructive psql/pg commands.
 //!
 //! This includes patterns for:
 //! - DROP DATABASE/TABLE/SCHEMA commands
 //! - TRUNCATE commands
 //! - dropdb CLI command
-//! - pg_dump with --clean flag
+//! - `pg_dump` with --clean flag
 
 use crate::packs::{DestructivePattern, Pack, SafePattern};
 use crate::{destructive_pattern, safe_pattern};
 
-/// Create the PostgreSQL pack.
+/// Create the `PostgreSQL` pack.
+#[must_use]
 pub fn create_pack() -> Pack {
     Pack {
         id: "database.postgresql".to_string(),
@@ -35,17 +36,11 @@ fn create_safe_patterns() -> Vec<SafePattern> {
             r"(?i)TRUNCATE\s+.*RESTART\s+IDENTITY"
         ),
         // pg_dump without --clean is safe (backup only)
-        safe_pattern!(
-            "pg-dump-no-clean",
-            r"pg_dump\s+(?!.*--clean)(?!.*-c\b)"
-        ),
+        safe_pattern!("pg-dump-no-clean", r"pg_dump\s+(?!.*--clean)(?!.*-c\b)"),
         // psql with --dry-run or explain
         safe_pattern!("psql-dry-run", r"psql\s+.*--dry-run"),
         // SELECT queries are safe
-        safe_pattern!(
-            "select-query",
-            r"(?i)^\s*SELECT\s+"
-        ),
+        safe_pattern!("select-query", r"(?i)^\s*SELECT\s+"),
     ]
 }
 
@@ -95,4 +90,3 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
     ]
 }
-
