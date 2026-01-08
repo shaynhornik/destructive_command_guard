@@ -430,6 +430,7 @@ fn refine_match_meta(
 ) -> Option<RefinedMatchMeta> {
     match language {
         ScriptLanguage::JavaScript => refine_javascript_match(meta, matched_text),
+        ScriptLanguage::TypeScript => refine_typescript_match(meta, matched_text),
         ScriptLanguage::Ruby => refine_ruby_match(meta, matched_text),
         _ => Some(RefinedMatchMeta {
             rule_id: meta.rule_id.clone(),
@@ -537,6 +538,114 @@ fn refine_javascript_match(meta: &CompiledPattern, matched_text: &str) -> Option
             rule_id: meta.rule_id.clone(),
             reason: meta.reason.clone(),
             severity: Severity::Medium,
+            suggestion: meta.suggestion.clone(),
+        });
+    }
+
+    Some(RefinedMatchMeta {
+        rule_id: meta.rule_id.clone(),
+        reason: meta.reason.clone(),
+        severity: meta.severity,
+        suggestion: meta.suggestion.clone(),
+    })
+}
+
+fn refine_typescript_match(meta: &CompiledPattern, matched_text: &str) -> Option<RefinedMatchMeta> {
+    let rule_id = meta.rule_id.as_str();
+
+    if matches!(
+        rule_id,
+        "heredoc.typescript.execsync" | "heredoc.typescript.require_execsync"
+    ) {
+        let payload = JS_EXEC_SYNC_LITERAL
+            .captures(matched_text)
+            .and_then(|caps| string_literal_from_caps(&caps));
+
+        if let Some(payload) = payload {
+            return detect_shell_payload(payload).map(|hit| RefinedMatchMeta {
+                rule_id: format!("{rule_id}.{}", hit.rule_suffix),
+                reason: hit.reason.to_string(),
+                severity: hit.severity,
+                suggestion: hit.suggestion.map(str::to_string),
+            });
+        }
+
+        return Some(RefinedMatchMeta {
+            rule_id: meta.rule_id.clone(),
+            reason: meta.reason.clone(),
+            severity: Severity::Medium,
+            suggestion: meta.suggestion.clone(),
+        });
+    }
+
+    if rule_id == "heredoc.typescript.spawnsync" {
+        if let Some(caps) = JS_SPAWN_SYNC_CMD_ARGS.captures(matched_text) {
+            let cmd = string_literal_from_caps(&caps).unwrap_or("");
+            let args = caps.name("args").map_or("", |m| m.as_str());
+            let args: Vec<&str> = JS_ARRAY_STRING_LITERALS
+                .captures_iter(args)
+                .filter_map(|caps| string_literal_from_caps(&caps))
+                .collect();
+
+            if let Some(reconstructed) = reconstruct_spawn_command(cmd, &args) {
+                return detect_shell_payload(&reconstructed).map(|hit| RefinedMatchMeta {
+                    rule_id: format!("{rule_id}.{}", hit.rule_suffix),
+                    reason: hit.reason.to_string(),
+                    severity: hit.severity,
+                    suggestion: hit.suggestion.map(str::to_string),
+                });
+            }
+
+            return None;
+        }
+
+        return Some(RefinedMatchMeta {
+            rule_id: meta.rule_id.clone(),
+            reason: meta.reason.clone(),
+            severity: Severity::Medium,
+            suggestion: meta.suggestion.clone(),
+        });
+    }
+
+    if rule_id.starts_with("heredoc.typescript.fs_")
+        || rule_id.starts_with("heredoc.typescript.fspromises_")
+        || rule_id == "heredoc.typescript.deno_remove"
+    {
+        let path = JS_FIRST_STRING_ARG
+            .captures(matched_text)
+            .and_then(|caps| string_literal_from_caps(&caps));
+
+        let recursive_relevant = JS_RECURSIVE_TRUE.is_match(matched_text);
+        let catastrophic = path.is_some_and(is_catastrophic_path);
+
+        let needs_recursive = matches!(
+            rule_id,
+            "heredoc.typescript.fs_rmsync"
+                | "heredoc.typescript.fs_rmdirsync"
+                | "heredoc.typescript.fs_rm"
+                | "heredoc.typescript.fs_rmdir"
+                | "heredoc.typescript.fspromises_rm"
+                | "heredoc.typescript.fspromises_rmdir"
+                | "heredoc.typescript.deno_remove"
+        );
+
+        if needs_recursive && !recursive_relevant && !catastrophic {
+            return None;
+        }
+
+        if catastrophic {
+            return Some(RefinedMatchMeta {
+                rule_id: format!("{rule_id}.catastrophic"),
+                reason: format!("{} (catastrophic target path)", meta.reason),
+                severity: Severity::Critical,
+                suggestion: meta.suggestion.clone(),
+            });
+        }
+
+        return Some(RefinedMatchMeta {
+            rule_id: meta.rule_id.clone(),
+            reason: meta.reason.clone(),
+            severity: meta.severity,
             suggestion: meta.suggestion.clone(),
         });
     }
@@ -1528,7 +1637,7 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
         ],
     );
 
-    // TypeScript patterns (similar to JavaScript)
+    // TypeScript patterns (git_safety_guard-26f)
     patterns.insert(
         ScriptLanguage::TypeScript,
         vec![
@@ -1536,22 +1645,85 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
                 "fs.rmSync($$$)".to_string(),
                 "heredoc.typescript.fs_rmsync".to_string(),
                 "fs.rmSync() deletes files/directories".to_string(),
-                Severity::Critical,
-                None,
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
+            ),
+            CompiledPattern::new(
+                "fs.rmdirSync($$$)".to_string(),
+                "heredoc.typescript.fs_rmdirsync".to_string(),
+                "fs.rmdirSync() deletes directories".to_string(),
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
             ),
             CompiledPattern::new(
                 "fs.unlinkSync($$$)".to_string(),
                 "heredoc.typescript.fs_unlinksync".to_string(),
                 "fs.unlinkSync() deletes files".to_string(),
-                Severity::High,
+                Severity::Low,
                 None,
             ),
             CompiledPattern::new(
                 "Deno.remove($$$)".to_string(),
                 "heredoc.typescript.deno_remove".to_string(),
                 "Deno.remove() deletes files/directories".to_string(),
-                Severity::High,
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
+            ),
+            CompiledPattern::new(
+                "child_process.execSync($$$)".to_string(),
+                "heredoc.typescript.execsync".to_string(),
+                "execSync() executes shell commands".to_string(),
+                Severity::Medium, // refined to block only on destructive literal payloads
+                Some("Validate command arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "require('child_process').execSync($$$)".to_string(),
+                "heredoc.typescript.require_execsync".to_string(),
+                "execSync() executes shell commands".to_string(),
+                Severity::Medium, // refined to block only on destructive literal payloads
+                Some("Validate command arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "child_process.spawnSync($$$)".to_string(),
+                "heredoc.typescript.spawnsync".to_string(),
+                "spawnSync() executes shell commands".to_string(),
+                Severity::Medium,
+                Some("Validate command and arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "fs.rm($$$)".to_string(),
+                "heredoc.typescript.fs_rm".to_string(),
+                "fs.rm() deletes files/directories".to_string(),
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
+            ),
+            CompiledPattern::new(
+                "fs.rmdir($$$)".to_string(),
+                "heredoc.typescript.fs_rmdir".to_string(),
+                "fs.rmdir() deletes directories".to_string(),
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
+            ),
+            CompiledPattern::new(
+                "fs.unlink($$$)".to_string(),
+                "heredoc.typescript.fs_unlink".to_string(),
+                "fs.unlink() deletes files".to_string(),
+                Severity::Low,
                 None,
+            ),
+            CompiledPattern::new(
+                "fsPromises.rm($$$)".to_string(),
+                "heredoc.typescript.fspromises_rm".to_string(),
+                "fsPromises.rm() deletes files/directories".to_string(),
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
+            ),
+            CompiledPattern::new(
+                "fsPromises.rmdir($$$)".to_string(),
+                "heredoc.typescript.fspromises_rmdir".to_string(),
+                "fsPromises.rmdir() deletes directories".to_string(),
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
             ),
         ],
     );
@@ -2358,18 +2530,152 @@ mod tests {
         }
     }
 
-    #[test]
-    fn typescript_positive_match() {
-        let matcher = AstMatcher::new();
-        let code = "import * as fs from 'fs';\nfs.rmSync('/tmp/test');";
+    mod typescript_positive_fixtures {
+        use super::*;
 
-        let matches = matcher.find_matches(code, ScriptLanguage::TypeScript);
-        match matches {
-            Ok(m) => {
-                assert!(!m.is_empty(), "should match fs.rmSync");
-                assert!(m[0].rule_id.contains("typescript"));
-            }
-            Err(e) => panic!("unexpected error: {e}"),
+        #[test]
+        fn fs_rmsync_catastrophic_blocks_with_type_assertion() {
+            let matcher = AstMatcher::new();
+            let code =
+                "import * as fs from 'fs';\nfs.rmSync('/etc' as string, { recursive: true });";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::TypeScript)
+                .unwrap();
+            assert!(
+                matches
+                    .iter()
+                    .any(|m| m.rule_id == "heredoc.typescript.fs_rmsync.catastrophic"
+                        && m.severity.blocks_by_default()),
+                "catastrophic fs.rmSync should block"
+            );
+        }
+
+        #[test]
+        fn fs_rmsync_non_catastrophic_warns_only() {
+            let matcher = AstMatcher::new();
+            let code = "import * as fs from 'fs';\nfs.rmSync('./dist', { recursive: true });";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::TypeScript)
+                .unwrap();
+            assert!(
+                matches
+                    .iter()
+                    .any(|m| m.rule_id == "heredoc.typescript.fs_rmsync"
+                        && !m.severity.blocks_by_default()),
+                "non-catastrophic recursive rmSync should warn only"
+            );
+        }
+
+        #[test]
+        fn execsync_git_reset_hard_blocks_inside_decorated_class() {
+            let matcher = AstMatcher::new();
+            let code = "@sealed\nclass Danger {\n  run(): void {\n    require('child_process').execSync('git reset --hard');\n  }\n}\n";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::TypeScript)
+                .unwrap();
+            assert!(
+                matches
+                    .iter()
+                    .any(|m| m.rule_id.ends_with(".git_reset_hard")
+                        && m.severity.blocks_by_default()),
+                "execSync('git reset --hard') should block"
+            );
+        }
+
+        #[test]
+        fn spawnsync_rm_rf_catastrophic_blocks_in_generic_function() {
+            let matcher = AstMatcher::new();
+            let code = "import * as child_process from 'child_process';\nfunction go<T extends string>(x: T): void {\n  child_process.spawnSync('rm', ['-rf', '/']);\n}\n";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::TypeScript)
+                .unwrap();
+            assert!(
+                matches
+                    .iter()
+                    .any(|m| m.rule_id.ends_with(".rm_rf_catastrophic")
+                        && m.severity.blocks_by_default()),
+                "spawnSync('rm', ['-rf','/']) should block"
+            );
+        }
+
+        #[test]
+        fn deno_remove_catastrophic_blocks() {
+            let matcher = AstMatcher::new();
+            let code = "type Path = string;\nconst p: Path = '/etc';\nDeno.remove('/etc', { recursive: true });";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::TypeScript)
+                .unwrap();
+            assert!(
+                matches.iter().any(
+                    |m| m.rule_id == "heredoc.typescript.deno_remove.catastrophic"
+                        && m.severity.blocks_by_default()
+                ),
+                "catastrophic Deno.remove should block"
+            );
+        }
+    }
+
+    mod typescript_negative_fixtures {
+        use super::*;
+
+        #[test]
+        fn execsync_safe_payload_does_not_match() {
+            let matcher = AstMatcher::new();
+            let code = "require('child_process').execSync('git status');";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::TypeScript)
+                .unwrap();
+            assert!(matches.is_empty());
+        }
+
+        #[test]
+        fn fs_rmsync_without_recursive_does_not_match() {
+            let matcher = AstMatcher::new();
+            let code = "import * as fs from 'fs';\nfs.rmSync('./file.txt' as string);";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::TypeScript)
+                .unwrap();
+            assert!(matches.is_empty());
+        }
+
+        #[test]
+        fn printed_dangerous_string_does_not_match() {
+            let matcher = AstMatcher::new();
+            let code = "console.log('rm -rf /');";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::TypeScript)
+                .unwrap();
+            assert!(matches.is_empty());
+        }
+
+        #[test]
+        fn require_child_process_alone_does_not_match() {
+            let matcher = AstMatcher::new();
+            let code = "require('child_process');";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::TypeScript)
+                .unwrap();
+            assert!(matches.is_empty());
+        }
+
+        #[test]
+        fn spawnsync_echo_does_not_match() {
+            let matcher = AstMatcher::new();
+            let code = "import * as child_process from 'child_process';\nchild_process.spawnSync('echo', ['rm -rf /']);";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::TypeScript)
+                .unwrap();
+            assert!(matches.is_empty());
         }
     }
 
