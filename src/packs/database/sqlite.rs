@@ -24,8 +24,6 @@ pub fn create_pack() -> Pack {
 
 fn create_safe_patterns() -> Vec<SafePattern> {
     vec![
-        // DROP with IF EXISTS is safer
-        safe_pattern!("drop-if-exists", r"(?i)DROP\s+TABLE\s+IF\s+EXISTS"),
         // SELECT queries are safe
         safe_pattern!("select-query", r"(?i)^\s*SELECT\s+"),
         // .schema, .tables, .dump are read-only
@@ -41,11 +39,11 @@ fn create_safe_patterns() -> Vec<SafePattern> {
 
 fn create_destructive_patterns() -> Vec<DestructivePattern> {
     vec![
-        // DROP TABLE without IF EXISTS
+        // DROP TABLE
         destructive_pattern!(
             "drop-table",
-            r"(?i)DROP\s+TABLE\s+(?!IF\s+EXISTS)",
-            "DROP TABLE permanently deletes the table. Consider using IF EXISTS."
+            r"(?i)\bDROP\s+TABLE\b",
+            "DROP TABLE permanently deletes the table (even with IF EXISTS). Verify it is intended."
         ),
         // DELETE without WHERE
         destructive_pattern!(

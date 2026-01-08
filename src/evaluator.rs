@@ -43,9 +43,9 @@
 //! }
 //! ```
 
+use crate::allowlist::{AllowlistLayer, LayeredAllowlist};
 use crate::config::Config;
 use crate::context::sanitize_for_pattern_matching;
-use crate::allowlist::{AllowlistLayer, LayeredAllowlist};
 use crate::packs::{REGISTRY, normalize_command, pack_aware_quick_reject};
 use std::collections::HashSet;
 
@@ -182,7 +182,11 @@ impl EvaluationResult {
 
     /// Create an "allowed" result due to allowlist override.
     #[must_use]
-    pub const fn allowed_by_allowlist(matched: PatternMatch, layer: AllowlistLayer, reason: String) -> Self {
+    pub const fn allowed_by_allowlist(
+        matched: PatternMatch,
+        layer: AllowlistLayer,
+        reason: String,
+    ) -> Self {
         Self {
             decision: EvaluationDecision::Allow,
             pattern_info: None,
@@ -246,6 +250,7 @@ impl EvaluationResult {
 /// - Quick rejection skips regex for 99%+ of commands
 /// - Config overrides use precompiled regexes (no per-command compilation)
 /// - Short-circuits on first match
+#[must_use]
 pub fn evaluate_command(
     command: &str,
     config: &Config,
@@ -294,36 +299,85 @@ pub fn evaluate_command(
     // For now, we skip this step here since main.rs handles it.
     // TODO: Move legacy patterns here once git_safety_guard-99e.3.4 is implemented.
 
-    // Step 7: Check against enabled packs from configuration
+    // Step 7: Check enabled packs with allowlist override semantics.
+    //
+    // IMPORTANT: allowlisting must bypass only the specific matched rule, and must not
+    // "disable other packs" by stopping evaluation early. If a command matches multiple
+    // packs/patterns, allowlisting the first match should still allow later matches to
+    // deny the command.
+    evaluate_packs_with_allowlists(&normalized, config, allowlists)
+}
+
+fn evaluate_packs_with_allowlists(
+    normalized: &str,
+    config: &Config,
+    allowlists: &LayeredAllowlist,
+) -> EvaluationResult {
     let enabled_packs: HashSet<String> = config.enabled_pack_ids();
-    let result = REGISTRY.check_command(&normalized, &enabled_packs);
+    let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
 
-    if result.blocked {
-        let reason = result.reason.as_deref().unwrap_or("Blocked by pack");
-        let pack_id = result.pack_id.as_deref().unwrap_or("unknown");
+    // If we allowlist a deny, we keep scanning for other denies. If none appear,
+    // we return ALLOW + the first allowlist override metadata for explain/logging.
+    let mut first_allowlist_hit: Option<(PatternMatch, AllowlistLayer, String)> = None;
 
-        // Allowlist check: only applies when we have a stable match identity (named pattern).
-        if let Some(pattern_name) = result.pattern_name.as_deref() {
-            if let Some(hit) = allowlists.match_rule(pack_id, pattern_name) {
-                return EvaluationResult::allowed_by_allowlist(
-                    PatternMatch {
-                        pack_id: Some(pack_id.to_string()),
-                        pattern_name: Some(pattern_name.to_string()),
-                        reason: reason.to_string(),
-                        source: MatchSource::Pack,
-                    },
-                    hit.layer,
-                    hit.entry.reason.clone(),
-                );
-            }
+    for pack_id in ordered_packs {
+        let Some(pack) = REGISTRY.get(&pack_id) else {
+            continue;
+        };
 
-            return EvaluationResult::denied_by_pack_pattern(pack_id, pattern_name, reason);
+        // Per-pack keyword quick reject.
+        if !pack.might_match(normalized) {
+            continue;
         }
 
-        return EvaluationResult::denied_by_pack(pack_id, reason);
+        // Pack safe patterns (whitelist) win within that pack.
+        if pack.matches_safe(normalized) {
+            continue;
+        }
+
+        for pattern in &pack.destructive_patterns {
+            // Until warn/log are fully surfaced, match only deny-by-default patterns.
+            if !pattern.severity.blocks_by_default() {
+                continue;
+            }
+
+            if !pattern.regex.is_match(normalized).unwrap_or(false) {
+                continue;
+            }
+
+            let reason = pattern.reason;
+
+            // Allowlist check: only applies when we have a stable match identity (named pattern).
+            if let Some(pattern_name) = pattern.name {
+                if let Some(hit) = allowlists.match_rule(&pack_id, pattern_name) {
+                    if first_allowlist_hit.is_none() {
+                        first_allowlist_hit = Some((
+                            PatternMatch {
+                                pack_id: Some(pack_id.clone()),
+                                pattern_name: Some(pattern_name.to_string()),
+                                reason: reason.to_string(),
+                                source: MatchSource::Pack,
+                            },
+                            hit.layer,
+                            hit.entry.reason.clone(),
+                        ));
+                    }
+
+                    // Bypass only this rule and keep evaluating other rules/packs.
+                    continue;
+                }
+
+                return EvaluationResult::denied_by_pack_pattern(&pack_id, pattern_name, reason);
+            }
+
+            return EvaluationResult::denied_by_pack(&pack_id, reason);
+        }
     }
 
-    // No pattern matched: default allow
+    if let Some((matched, layer, reason)) = first_allowlist_hit {
+        return EvaluationResult::allowed_by_allowlist(matched, layer, reason);
+    }
+
     EvaluationResult::allowed()
 }
 
@@ -407,36 +461,8 @@ where
         }
     }
 
-    // Step 7: Check against enabled packs from configuration
-    let enabled_packs: HashSet<String> = config.enabled_pack_ids();
-    let result = REGISTRY.check_command(&normalized, &enabled_packs);
-
-    if result.blocked {
-        let reason = result.reason.as_deref().unwrap_or("Blocked by pack");
-        let pack_id = result.pack_id.as_deref().unwrap_or("unknown");
-
-        if let Some(pattern_name) = result.pattern_name.as_deref() {
-            if let Some(hit) = allowlists.match_rule(pack_id, pattern_name) {
-                return EvaluationResult::allowed_by_allowlist(
-                    PatternMatch {
-                        pack_id: Some(pack_id.to_string()),
-                        pattern_name: Some(pattern_name.to_string()),
-                        reason: reason.to_string(),
-                        source: MatchSource::Pack,
-                    },
-                    hit.layer,
-                    hit.entry.reason.clone(),
-                );
-            }
-
-            return EvaluationResult::denied_by_pack_pattern(pack_id, pattern_name, reason);
-        }
-
-        return EvaluationResult::denied_by_pack(pack_id, reason);
-    }
-
-    // No pattern matched: default allow
-    EvaluationResult::allowed()
+    // Step 7: Check enabled packs with allowlist override semantics.
+    evaluate_packs_with_allowlists(&normalized, config, allowlists)
 }
 
 /// Trait for legacy safe patterns.
@@ -456,7 +482,13 @@ pub trait LegacyDestructivePattern {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::allowlist::{
+        AllowEntry, AllowSelector, AllowlistFile, LoadedAllowlistLayer, RuleId,
+    };
     use fancy_regex::Regex;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn default_config() -> Config {
         Config::default()
@@ -468,6 +500,56 @@ mod tests {
 
     fn default_allowlists() -> LayeredAllowlist {
         LayeredAllowlist::default()
+    }
+
+    fn project_allowlists_for_rule(rule: &str, reason: &str) -> LayeredAllowlist {
+        let rule = RuleId::parse(rule).expect("rule id must parse");
+        LayeredAllowlist {
+            layers: vec![LoadedAllowlistLayer {
+                layer: AllowlistLayer::Project,
+                path: PathBuf::from("project-allowlist.toml"),
+                file: AllowlistFile {
+                    entries: vec![AllowEntry {
+                        selector: AllowSelector::Rule(rule),
+                        reason: reason.to_string(),
+                        added_by: None,
+                        added_at: None,
+                        expires_at: None,
+                        context: None,
+                        conditions: HashMap::new(),
+                        environments: Vec::new(),
+                        risk_acknowledged: false,
+                    }],
+                    errors: Vec::new(),
+                },
+            }],
+        }
+    }
+
+    fn project_allowlists_for_pack_wildcard(pack_id: &str, reason: &str) -> LayeredAllowlist {
+        LayeredAllowlist {
+            layers: vec![LoadedAllowlistLayer {
+                layer: AllowlistLayer::Project,
+                path: PathBuf::from("project-allowlist.toml"),
+                file: AllowlistFile {
+                    entries: vec![AllowEntry {
+                        selector: AllowSelector::Rule(RuleId {
+                            pack_id: pack_id.to_string(),
+                            pattern_name: "*".to_string(),
+                        }),
+                        reason: reason.to_string(),
+                        added_by: None,
+                        added_at: None,
+                        expires_at: None,
+                        context: None,
+                        conditions: HashMap::new(),
+                        environments: Vec::new(),
+                        risk_acknowledged: false,
+                    }],
+                    errors: Vec::new(),
+                },
+            }],
+        }
     }
 
     #[test]
@@ -545,7 +627,13 @@ mod tests {
         let compiled = default_compiled_overrides();
         let allowlists = default_allowlists();
         // Command with no relevant keywords should be quickly allowed
-        let result = evaluate_command("cargo build --release", &config, &["git", "rm"], &compiled, &allowlists);
+        let result = evaluate_command(
+            "cargo build --release",
+            &config,
+            &["git", "rm"],
+            &compiled,
+            &allowlists,
+        );
         assert!(result.is_allowed());
 
         // Even with more keywords
@@ -572,6 +660,159 @@ mod tests {
         assert_eq!(MatchSource::LegacyPattern, MatchSource::LegacyPattern);
         assert_eq!(MatchSource::Pack, MatchSource::Pack);
         assert_ne!(MatchSource::ConfigOverride, MatchSource::Pack);
+    }
+
+    // =========================================================================
+    // Allowlist Override Tests (git_safety_guard-1gt.2.2)
+    // =========================================================================
+
+    #[test]
+    fn allowlist_hit_overrides_deny() {
+        let config = default_config();
+        let compiled = default_compiled_overrides();
+        let allowlists = project_allowlists_for_rule("core.git:reset-hard", "local dev flow");
+
+        let result = evaluate_command(
+            "git reset --hard",
+            &config,
+            &["git"],
+            &compiled,
+            &allowlists,
+        );
+        assert!(
+            result.is_allowed(),
+            "allowlisting the matched rule should override deny"
+        );
+
+        let override_info = result
+            .allowlist_override
+            .as_ref()
+            .expect("allowlist override metadata must be present");
+        assert_eq!(override_info.layer, AllowlistLayer::Project);
+        assert_eq!(override_info.reason, "local dev flow");
+        assert_eq!(override_info.matched.pack_id.as_deref(), Some("core.git"));
+        assert_eq!(
+            override_info.matched.pattern_name.as_deref(),
+            Some("reset-hard")
+        );
+        assert_eq!(override_info.matched.source, MatchSource::Pack);
+    }
+
+    #[test]
+    fn allowlist_miss_does_not_change_decision() {
+        let config = default_config();
+        let compiled = default_compiled_overrides();
+        let allowlists = project_allowlists_for_rule("core.git:reset-merge", "not this one");
+
+        let result = evaluate_command(
+            "git reset --hard",
+            &config,
+            &["git"],
+            &compiled,
+            &allowlists,
+        );
+        assert!(
+            result.is_denied(),
+            "non-matching allowlist entries must not affect decision"
+        );
+        assert!(result.allowlist_override.is_none());
+        assert_eq!(result.pack_id(), Some("core.git"));
+    }
+
+    #[test]
+    fn wildcard_allowlist_matches_only_within_pack() {
+        let config = default_config();
+        let compiled = default_compiled_overrides();
+        let allowlists = project_allowlists_for_pack_wildcard("core.git", "allow all core.git");
+
+        // Matches core.git, should allow.
+        let git_result = evaluate_command(
+            "git reset --hard",
+            &config,
+            &["git", "rm"],
+            &compiled,
+            &allowlists,
+        );
+        assert!(git_result.is_allowed());
+        assert!(git_result.allowlist_override.is_some());
+
+        // Matches core.filesystem, should still deny (wildcard is pack-scoped).
+        let rm_result = evaluate_command(
+            "rm -rf /etc",
+            &config,
+            &["git", "rm"],
+            &compiled,
+            &allowlists,
+        );
+        assert!(rm_result.is_denied());
+        assert_eq!(rm_result.pack_id(), Some("core.filesystem"));
+    }
+
+    #[test]
+    fn allowlisting_one_rule_does_not_disable_other_packs() {
+        let mut config = default_config();
+        config.packs.enabled.push("strict_git".to_string());
+
+        let compiled = config.overrides.compile();
+        let allowlists =
+            project_allowlists_for_rule("core.git:push-force-long", "allow core force");
+
+        // This command matches BOTH core.git and strict_git.
+        // Allowlisting the core.git rule must not bypass strict_git.
+        let result = evaluate_command(
+            "git push origin main --force",
+            &config,
+            &["git"],
+            &compiled,
+            &allowlists,
+        );
+
+        assert!(result.is_denied());
+        assert_eq!(result.pack_id(), Some("strict_git"));
+        assert_eq!(
+            result
+                .pattern_info
+                .as_ref()
+                .unwrap()
+                .pattern_name
+                .as_deref(),
+            Some("push-force-any")
+        );
+    }
+
+    #[test]
+    fn integration_allowlist_file_overrides_deny() {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+        let config = default_config();
+        let compiled = default_compiled_overrides();
+
+        let tmp = std::env::temp_dir();
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = tmp.join(format!(
+            "dcg_allowlist_test_{}_{}.toml",
+            std::process::id(),
+            unique
+        ));
+
+        let toml = r#"
+            [[allow]]
+            rule = "core.git:reset-hard"
+            reason = "integration test"
+        "#;
+        std::fs::write(&path, toml).expect("write allowlist file");
+
+        let allowlists = LayeredAllowlist::load_from_paths(Some(path), None, None);
+
+        let result = evaluate_command(
+            "git reset --hard",
+            &config,
+            &["git"],
+            &compiled,
+            &allowlists,
+        );
+        assert!(result.is_allowed());
+        assert!(result.allowlist_override.is_some());
     }
 
     // =========================================================================

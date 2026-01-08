@@ -34,6 +34,7 @@
 use crate::heredoc::ScriptLanguage;
 use ast_grep_core::{AstGrep, Pattern};
 use ast_grep_language::SupportLang;
+use memchr::memchr_iter;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
@@ -102,7 +103,10 @@ pub enum MatchError {
     /// Language not supported by ast-grep.
     UnsupportedLanguage(ScriptLanguage),
     /// Failed to parse content as the specified language.
-    ParseError { language: ScriptLanguage, detail: String },
+    ParseError {
+        language: ScriptLanguage,
+        detail: String,
+    },
     /// Pattern matching exceeded timeout.
     Timeout { elapsed_ms: u64, budget_ms: u64 },
     /// Pattern compilation failed (should not happen with static patterns).
@@ -118,8 +122,14 @@ impl std::fmt::Display for MatchError {
             Self::ParseError { language, detail } => {
                 write!(f, "AST parse error for {language:?}: {detail}")
             }
-            Self::Timeout { elapsed_ms, budget_ms } => {
-                write!(f, "AST matching timeout: {elapsed_ms}ms > {budget_ms}ms budget")
+            Self::Timeout {
+                elapsed_ms,
+                budget_ms,
+            } => {
+                write!(
+                    f,
+                    "AST matching timeout: {elapsed_ms}ms > {budget_ms}ms budget"
+                )
             }
             Self::PatternError { pattern, detail } => {
                 write!(f, "pattern compilation error for '{pattern}': {detail}")
@@ -163,12 +173,18 @@ impl CompiledPattern {
     }
 }
 
+#[derive(Debug)]
+struct PrecompiledPattern {
+    pattern: Pattern,
+    meta: CompiledPattern,
+}
+
 /// AST pattern matcher using ast-grep-core.
 ///
 /// Holds pre-compiled patterns for each supported language.
 pub struct AstMatcher {
     /// Patterns organized by language.
-    patterns: HashMap<ScriptLanguage, Vec<CompiledPattern>>,
+    patterns: HashMap<ScriptLanguage, Vec<PrecompiledPattern>>,
     /// Timeout for matching operations.
     timeout: Duration,
 }
@@ -184,7 +200,7 @@ impl AstMatcher {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            patterns: default_patterns(),
+            patterns: precompile_patterns(default_patterns()),
             timeout: Duration::from_millis(AST_TIMEOUT_MS),
         }
     }
@@ -194,7 +210,7 @@ impl AstMatcher {
     #[allow(clippy::missing_const_for_fn)] // HashMap is not const-constructible
     pub fn with_patterns(patterns: HashMap<ScriptLanguage, Vec<CompiledPattern>>) -> Self {
         Self {
-            patterns,
+            patterns: precompile_patterns(patterns),
             timeout: Duration::from_millis(AST_TIMEOUT_MS),
         }
     }
@@ -243,6 +259,8 @@ impl AstMatcher {
             _ => return Ok(Vec::new()), // No patterns = no matches
         };
 
+        let newline_positions: Vec<usize> = memchr_iter(b'\n', code.as_bytes()).collect();
+
         // Parse the code
         let ast = AstGrep::new(code, ast_lang);
         let root = ast.root();
@@ -261,39 +279,31 @@ impl AstMatcher {
                 return Err(timeout_err(start_time));
             }
 
-            // Try to compile the pattern
-            let pattern = match Pattern::try_new(&compiled.pattern_str, ast_lang) {
-                Ok(p) => p,
-                Err(e) => {
-                    // Log but continue - pattern error shouldn't block all matching
-                    eprintln!(
-                        "Warning: failed to compile pattern '{}': {}",
-                        compiled.pattern_str, e
-                    );
-                    continue;
-                }
-            };
-
             // Find all matches for this pattern
-            for node in root.find_all(&pattern) {
+            for node in root.find_all(&compiled.pattern) {
+                // Check timeout during matching (a single pattern can match many nodes)
+                if start_time.elapsed() > self.timeout {
+                    return Err(timeout_err(start_time));
+                }
+
                 let matched_text = node.text();
                 let range = node.range();
 
                 // Calculate line number (1-based)
-                let line_number = code[..range.start].matches('\n').count() + 1;
+                let line_number = newline_positions.partition_point(|&idx| idx < range.start) + 1;
 
                 // Create preview (truncate if too long, UTF-8 safe)
                 let preview = truncate_preview(&matched_text, 60);
 
                 matches.push(PatternMatch {
-                    rule_id: compiled.rule_id.clone(),
-                    reason: compiled.reason.clone(),
+                    rule_id: compiled.meta.rule_id.clone(),
+                    reason: compiled.meta.reason.clone(),
                     matched_text_preview: preview,
                     start: range.start,
                     end: range.end,
                     line_number,
-                    severity: compiled.severity,
-                    suggestion: compiled.suggestion.clone(),
+                    severity: compiled.meta.severity,
+                    suggestion: compiled.meta.suggestion.clone(),
                 });
             }
         }
@@ -305,11 +315,7 @@ impl AstMatcher {
     ///
     /// Returns the first blocking match, or None if no blocking patterns match.
     #[must_use]
-    pub fn has_blocking_match(
-        &self,
-        code: &str,
-        language: ScriptLanguage,
-    ) -> Option<PatternMatch> {
+    pub fn has_blocking_match(&self, code: &str, language: ScriptLanguage) -> Option<PatternMatch> {
         self.find_matches(code, language)
             .ok()
             .and_then(|matches| matches.into_iter().find(|m| m.severity.blocks_by_default()))
@@ -492,6 +498,51 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
                 Severity::High,
                 None,
             ),
+            // Spawn variants
+            CompiledPattern::new(
+                "child_process.spawnSync($$$)".to_string(),
+                "heredoc.javascript.spawnsync".to_string(),
+                "spawnSync() executes shell commands".to_string(),
+                Severity::Medium,
+                Some("Validate command and arguments carefully".to_string()),
+            ),
+            // Async versions (still dangerous)
+            CompiledPattern::new(
+                "fs.rm($$$)".to_string(),
+                "heredoc.javascript.fs_rm".to_string(),
+                "fs.rm() deletes files/directories".to_string(),
+                Severity::High,
+                None,
+            ),
+            CompiledPattern::new(
+                "fs.rmdir($$$)".to_string(),
+                "heredoc.javascript.fs_rmdir".to_string(),
+                "fs.rmdir() deletes directories".to_string(),
+                Severity::High,
+                None,
+            ),
+            CompiledPattern::new(
+                "fs.unlink($$$)".to_string(),
+                "heredoc.javascript.fs_unlink".to_string(),
+                "fs.unlink() deletes files".to_string(),
+                Severity::High,
+                None,
+            ),
+            // Promise-based fs variants
+            CompiledPattern::new(
+                "fsPromises.rm($$$)".to_string(),
+                "heredoc.javascript.fspromises_rm".to_string(),
+                "fsPromises.rm() deletes files/directories".to_string(),
+                Severity::High,
+                None,
+            ),
+            CompiledPattern::new(
+                "fsPromises.rmdir($$$)".to_string(),
+                "heredoc.javascript.fspromises_rmdir".to_string(),
+                "fsPromises.rmdir() deletes directories".to_string(),
+                Severity::High,
+                None,
+            ),
         ],
     );
 
@@ -523,21 +574,38 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
         ],
     );
 
-    // Ruby patterns
+    // Ruby patterns (git_safety_guard-mvh)
     patterns.insert(
         ScriptLanguage::Ruby,
         vec![
+            // =========================================================================
+            // Filesystem Deletion (High Signal)
+            // =========================================================================
             CompiledPattern::new(
                 "FileUtils.rm_rf($$$)".to_string(),
                 "heredoc.ruby.fileutils_rm_rf".to_string(),
                 "FileUtils.rm_rf() recursively deletes directories".to_string(),
                 Severity::Critical,
+                Some("Verify target path carefully before running".to_string()),
+            ),
+            CompiledPattern::new(
+                "FileUtils.remove_dir($$$)".to_string(),
+                "heredoc.ruby.fileutils_remove_dir".to_string(),
+                "FileUtils.remove_dir() deletes directories".to_string(),
+                Severity::High,
                 None,
             ),
             CompiledPattern::new(
                 "FileUtils.rm($$$)".to_string(),
                 "heredoc.ruby.fileutils_rm".to_string(),
                 "FileUtils.rm() deletes files".to_string(),
+                Severity::High,
+                None,
+            ),
+            CompiledPattern::new(
+                "FileUtils.remove($$$)".to_string(),
+                "heredoc.ruby.fileutils_remove".to_string(),
+                "FileUtils.remove() deletes files".to_string(),
                 Severity::High,
                 None,
             ),
@@ -549,6 +617,13 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
                 None,
             ),
             CompiledPattern::new(
+                "File.unlink($$$)".to_string(),
+                "heredoc.ruby.file_unlink".to_string(),
+                "File.unlink() removes files".to_string(),
+                Severity::High,
+                None,
+            ),
+            CompiledPattern::new(
                 "Dir.rmdir($$$)".to_string(),
                 "heredoc.ruby.dir_rmdir".to_string(),
                 "Dir.rmdir() removes directories".to_string(),
@@ -556,11 +631,58 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
                 None,
             ),
             CompiledPattern::new(
+                "Dir.delete($$$)".to_string(),
+                "heredoc.ruby.dir_delete".to_string(),
+                "Dir.delete() removes directories".to_string(),
+                Severity::High,
+                None,
+            ),
+            // =========================================================================
+            // Process Execution (Medium severity by default - avoid false positives)
+            // =========================================================================
+            CompiledPattern::new(
                 "system($$$)".to_string(),
                 "heredoc.ruby.system".to_string(),
                 "system() executes shell commands".to_string(),
                 Severity::Medium,
                 Some("Validate command arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "exec($$$)".to_string(),
+                "heredoc.ruby.exec".to_string(),
+                "exec() replaces process with shell command".to_string(),
+                Severity::Medium,
+                Some("Validate command arguments carefully".to_string()),
+            ),
+            // Kernel.system and Kernel.exec variants
+            CompiledPattern::new(
+                "Kernel.system($$$)".to_string(),
+                "heredoc.ruby.kernel_system".to_string(),
+                "Kernel.system() executes shell commands".to_string(),
+                Severity::Medium,
+                Some("Validate command arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "Kernel.exec($$$)".to_string(),
+                "heredoc.ruby.kernel_exec".to_string(),
+                "Kernel.exec() replaces process with shell command".to_string(),
+                Severity::Medium,
+                Some("Validate command arguments carefully".to_string()),
+            ),
+            // Open3 for shell execution
+            CompiledPattern::new(
+                "Open3.capture3($$$)".to_string(),
+                "heredoc.ruby.open3_capture3".to_string(),
+                "Open3.capture3() executes shell commands".to_string(),
+                Severity::Medium,
+                None,
+            ),
+            CompiledPattern::new(
+                "Open3.popen3($$$)".to_string(),
+                "heredoc.ruby.open3_popen3".to_string(),
+                "Open3.popen3() executes shell commands".to_string(),
+                Severity::Medium,
+                None,
             ),
         ],
     );
@@ -606,6 +728,34 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
 /// Global default matcher instance (lazy-initialized).
 pub static DEFAULT_MATCHER: LazyLock<AstMatcher> = LazyLock::new(AstMatcher::new);
 
+fn precompile_patterns(
+    patterns: HashMap<ScriptLanguage, Vec<CompiledPattern>>,
+) -> HashMap<ScriptLanguage, Vec<PrecompiledPattern>> {
+    let mut out: HashMap<ScriptLanguage, Vec<PrecompiledPattern>> = HashMap::new();
+
+    for (language, patterns) in patterns {
+        let Some(ast_lang) = script_language_to_ast_lang(language) else {
+            continue;
+        };
+
+        let mut compiled = Vec::with_capacity(patterns.len());
+        for meta in patterns {
+            let Ok(pattern) = Pattern::try_new(&meta.pattern_str, ast_lang) else {
+                // Fail-open: skip invalid patterns silently (default patterns should be validated by tests).
+                continue;
+            };
+
+            compiled.push(PrecompiledPattern { pattern, meta });
+        }
+
+        if !compiled.is_empty() {
+            out.insert(language, compiled);
+        }
+    }
+
+    out
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -614,6 +764,7 @@ pub static DEFAULT_MATCHER: LazyLock<AstMatcher> = LazyLock::new(AstMatcher::new
 #[allow(clippy::similar_names)] // `matcher` vs `matches` is readable in test code
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn severity_labels() {
@@ -813,6 +964,23 @@ mod tests {
     }
 
     #[test]
+    fn default_patterns_all_precompile() {
+        let raw = default_patterns();
+        let expected: HashMap<ScriptLanguage, usize> =
+            raw.iter().map(|(lang, pats)| (*lang, pats.len())).collect();
+
+        let compiled = precompile_patterns(raw);
+
+        for (lang, expected_len) in expected {
+            let got = compiled.get(&lang).map_or(0, std::vec::Vec::len);
+            assert_eq!(
+                got, expected_len,
+                "all default patterns should compile for {lang:?}"
+            );
+        }
+    }
+
+    #[test]
     fn truncate_preview_handles_utf8_safely() {
         // Test with ASCII
         assert_eq!(truncate_preview("hello", 10), "hello");
@@ -984,7 +1152,10 @@ mod tests {
             let matches = matcher.find_matches(code, ScriptLanguage::Python).unwrap();
             assert!(!matches.is_empty(), "subprocess.run must match");
             assert_eq!(matches[0].rule_id, "heredoc.python.subprocess_run");
-            assert!(!matches[0].severity.blocks_by_default(), "Medium should not block");
+            assert!(
+                !matches[0].severity.blocks_by_default(),
+                "Medium should not block"
+            );
         }
 
         #[test]
@@ -995,7 +1166,10 @@ mod tests {
             let matches = matcher.find_matches(code, ScriptLanguage::Python).unwrap();
             assert!(!matches.is_empty(), "os.system must match");
             assert_eq!(matches[0].rule_id, "heredoc.python.os_system");
-            assert!(!matches[0].severity.blocks_by_default(), "Medium should not block");
+            assert!(
+                !matches[0].severity.blocks_by_default(),
+                "Medium should not block"
+            );
         }
     }
 

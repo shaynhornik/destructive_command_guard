@@ -89,12 +89,13 @@ pub use context::{
 
 // Re-export heredoc detection types
 pub use heredoc::{
-    ExtractedContent, ExtractionLimits, ExtractionResult, HeredocType, ScriptLanguage,
-    TriggerResult, check_triggers, extract_content, matched_triggers,
+    ExtractedContent, ExtractedShellCommand, ExtractionLimits, ExtractionResult, HeredocType,
+    ScriptLanguage, TriggerResult, check_triggers, extract_content, extract_shell_commands,
+    matched_triggers,
 };
 
 // Re-export AST matcher types
 pub use ast_matcher::{
-    AstMatcher, CompiledPattern, MatchError, PatternMatch as AstPatternMatch, Severity,
-    DEFAULT_MATCHER,
+    AstMatcher, CompiledPattern, DEFAULT_MATCHER, MatchError, PatternMatch as AstPatternMatch,
+    Severity,
 };

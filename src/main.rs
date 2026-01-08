@@ -390,6 +390,7 @@ fn print_version() {
     eprintln!();
 }
 
+#[allow(clippy::too_many_lines)]
 fn main() {
     // Configure colors based on TTY detection
     configure_colors();
@@ -518,27 +519,52 @@ fn main() {
     // Normalize the command (strips /usr/bin/git -> git, etc.)
     let normalized = normalize_command(command_for_match);
 
-    // Check against enabled packs from configuration
-    // (enabled_packs was computed earlier for pack-aware quick reject)
-    let result = REGISTRY.check_command(&normalized, &enabled_packs);
+    // Check against enabled packs from configuration.
+    //
+    // IMPORTANT: allowlisting must bypass only the specific matched rule and must not
+    // prevent other packs from being evaluated. If allowlisted, keep scanning.
+    let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
 
-    if result.blocked {
-        // Allowlist check: only applies when the matched pack pattern has a stable name.
-        if let (Some(pack_id), Some(pattern_name)) =
-            (result.pack_id.as_deref(), result.pattern_name.as_deref())
-        {
-            if allowlists.match_rule(pack_id, pattern_name).is_some() {
-                return;
-            }
+    for pack_id in ordered_packs {
+        let Some(pack) = REGISTRY.get(&pack_id) else {
+            continue;
+        };
+
+        if !pack.might_match(&normalized) {
+            continue;
         }
 
-        let reason = result.reason.as_deref().unwrap_or("Blocked by pack");
-        let pack_id = result.pack_id.as_deref();
-        hook::output_denial(&command, reason, pack_id);
+        if pack.matches_safe(&normalized) {
+            continue;
+        }
 
-        // Log if configured
-        if let Some(log_file) = &config.general.log_file {
-            let _ = hook::log_blocked_command(log_file, &command, reason, pack_id);
+        for pattern in &pack.destructive_patterns {
+            // Until warn/log are surfaced in hook output, only deny-by-default patterns block.
+            if !pattern.severity.blocks_by_default() {
+                continue;
+            }
+
+            if !pattern.regex.is_match(&normalized).unwrap_or(false) {
+                continue;
+            }
+
+            // Allowlist check: only applies when the matched pack pattern has a stable name.
+            if let Some(pattern_name) = pattern.name {
+                if allowlists.match_rule(&pack_id, pattern_name).is_some() {
+                    continue;
+                }
+            }
+
+            let reason = pattern.reason;
+            let pack_id_str = Some(pack_id.as_str());
+            hook::output_denial(&command, reason, pack_id_str);
+
+            // Log if configured
+            if let Some(log_file) = &config.general.log_file {
+                let _ = hook::log_blocked_command(log_file, &command, reason, pack_id_str);
+            }
+
+            return;
         }
     }
 

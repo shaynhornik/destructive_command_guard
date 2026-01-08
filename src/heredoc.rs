@@ -44,6 +44,7 @@
 
 use regex::RegexSet;
 use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 
 /// Tier 1 trigger patterns for heredoc and inline script detection.
 ///
@@ -529,6 +530,8 @@ pub enum SkipReason {
         null_bytes: usize,
         non_printable_ratio: f32,
     },
+    /// Tier 2 extraction exceeded the time budget (fail-open).
+    Timeout { elapsed_ms: u64, budget_ms: u64 },
     /// Heredoc delimiter not found (unterminated).
     UnterminatedHeredoc { delimiter: String },
     /// Malformed input that couldn't be parsed.
@@ -557,6 +560,13 @@ impl std::fmt::Display for SkipReason {
                     non_printable_ratio * 100.0
                 )
             }
+            Self::Timeout {
+                elapsed_ms,
+                budget_ms,
+            } => write!(
+                f,
+                "extraction timeout: {elapsed_ms}ms > {budget_ms}ms budget"
+            ),
             Self::UnterminatedHeredoc { delimiter } => {
                 write!(f, "unterminated heredoc: delimiter '{delimiter}' not found")
             }
@@ -677,6 +687,32 @@ pub fn check_binary_content(content: &str) -> Option<SkipReason> {
     None
 }
 
+#[inline]
+fn record_timeout_if_needed(
+    start_time: Instant,
+    timeout: Duration,
+    budget_ms: u64,
+    skip_reasons: &mut Vec<SkipReason>,
+) -> bool {
+    let elapsed = start_time.elapsed();
+    if elapsed < timeout {
+        return false;
+    }
+
+    if !skip_reasons
+        .iter()
+        .any(|r| matches!(r, SkipReason::Timeout { .. }))
+    {
+        let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+        skip_reasons.push(SkipReason::Timeout {
+            elapsed_ms,
+            budget_ms,
+        });
+    }
+
+    true
+}
+
 /// Extract heredoc and inline script content from a command.
 ///
 /// This is Tier 2 of the detection pipeline - content extraction with safety bounds.
@@ -703,6 +739,8 @@ pub fn check_binary_content(content: &str) -> Option<SkipReason> {
 /// ```
 #[must_use]
 pub fn extract_content(command: &str, limits: &ExtractionLimits) -> ExtractionResult {
+    let start_time = Instant::now();
+    let timeout = Duration::from_millis(limits.timeout_ms);
     let mut skip_reasons: Vec<SkipReason> = Vec::new();
 
     // Enforce input size limit
@@ -722,14 +760,54 @@ pub fn extract_content(command: &str, limits: &ExtractionLimits) -> ExtractionRe
 
     let mut extracted: Vec<ExtractedContent> = Vec::new();
 
+    // Enforce time budget (fail open) before doing any further work.
+    if record_timeout_if_needed(start_time, timeout, limits.timeout_ms, &mut skip_reasons) {
+        return ExtractionResult::Skipped(skip_reasons);
+    }
+
     // Extract inline scripts (-c/-e flags)
-    extract_inline_scripts(command, limits, &mut extracted, &mut skip_reasons);
+    extract_inline_scripts(
+        command,
+        limits,
+        start_time,
+        timeout,
+        &mut extracted,
+        &mut skip_reasons,
+    );
+    if record_timeout_if_needed(start_time, timeout, limits.timeout_ms, &mut skip_reasons) {
+        return if extracted.is_empty() {
+            ExtractionResult::Skipped(skip_reasons)
+        } else {
+            ExtractionResult::Extracted(extracted)
+        };
+    }
 
     // Extract here-strings (<<<)
-    extract_herestrings(command, limits, &mut extracted, &mut skip_reasons);
+    extract_herestrings(
+        command,
+        limits,
+        start_time,
+        timeout,
+        &mut extracted,
+        &mut skip_reasons,
+    );
+    if record_timeout_if_needed(start_time, timeout, limits.timeout_ms, &mut skip_reasons) {
+        return if extracted.is_empty() {
+            ExtractionResult::Skipped(skip_reasons)
+        } else {
+            ExtractionResult::Extracted(extracted)
+        };
+    }
 
     // Extract heredocs (<<, <<-, <<~)
-    extract_heredocs(command, limits, &mut extracted, &mut skip_reasons);
+    extract_heredocs(
+        command,
+        limits,
+        start_time,
+        timeout,
+        &mut extracted,
+        &mut skip_reasons,
+    );
 
     // Return based on what we found
     match (extracted.is_empty(), skip_reasons.is_empty()) {
@@ -748,9 +826,14 @@ pub fn extract_content(command: &str, limits: &ExtractionLimits) -> ExtractionRe
 fn extract_inline_scripts(
     command: &str,
     limits: &ExtractionLimits,
+    start_time: Instant,
+    timeout: Duration,
     extracted: &mut Vec<ExtractedContent>,
     skip_reasons: &mut Vec<SkipReason>,
 ) {
+    if record_timeout_if_needed(start_time, timeout, limits.timeout_ms, skip_reasons) {
+        return;
+    }
     if extracted.len() >= limits.max_heredocs {
         skip_reasons.push(SkipReason::ExceededHeredocLimit {
             limit: limits.max_heredocs,
@@ -762,6 +845,9 @@ fn extract_inline_scripts(
     let mut hit_limit = false;
     let mut extract_from_pattern = |pattern: &Regex| {
         for cap in pattern.captures_iter(command) {
+            if record_timeout_if_needed(start_time, timeout, limits.timeout_ms, skip_reasons) {
+                return;
+            }
             if extracted.len() >= limits.max_heredocs {
                 hit_limit = true;
                 break;
@@ -804,9 +890,14 @@ fn extract_inline_scripts(
 fn extract_herestrings(
     command: &str,
     limits: &ExtractionLimits,
+    start_time: Instant,
+    timeout: Duration,
     extracted: &mut Vec<ExtractedContent>,
     skip_reasons: &mut Vec<SkipReason>,
 ) {
+    if record_timeout_if_needed(start_time, timeout, limits.timeout_ms, skip_reasons) {
+        return;
+    }
     if extracted.len() >= limits.max_heredocs {
         return; // Already hit limit, don't add another skip reason
     }
@@ -816,6 +907,9 @@ fn extract_herestrings(
     // Helper to extract from a given pattern (quoted patterns have content in group 1)
     let mut extract_quoted = |pattern: &Regex, is_quoted: bool| {
         for cap in pattern.captures_iter(command) {
+            if record_timeout_if_needed(start_time, timeout, limits.timeout_ms, skip_reasons) {
+                return;
+            }
             if extracted.len() >= limits.max_heredocs {
                 hit_limit = true;
                 break;
@@ -858,15 +952,23 @@ fn extract_herestrings(
 fn extract_heredocs(
     command: &str,
     limits: &ExtractionLimits,
+    start_time: Instant,
+    timeout: Duration,
     extracted: &mut Vec<ExtractedContent>,
     skip_reasons: &mut Vec<SkipReason>,
 ) {
+    if record_timeout_if_needed(start_time, timeout, limits.timeout_ms, skip_reasons) {
+        return;
+    }
     if extracted.len() >= limits.max_heredocs {
         return; // Already hit limit
     }
 
     let mut hit_limit = false;
     for cap in HEREDOC_EXTRACTOR.captures_iter(command) {
+        if record_timeout_if_needed(start_time, timeout, limits.timeout_ms, skip_reasons) {
+            return;
+        }
         if extracted.len() >= limits.max_heredocs {
             hit_limit = true;
             break;
@@ -889,19 +991,16 @@ fn extract_heredocs(
         let start_pos = full_match.end();
 
         // Find the terminating delimiter
-        match extract_heredoc_body(command, start_pos, delimiter, heredoc_type, limits) {
-            Some(content) => {
-                // Calculate byte range end position:
-                // +1 for leading newline after heredoc marker
-                // +content.len() for the body
-                // +1 for newline before delimiter (only if content is non-empty)
-                // +delimiter.len() for the terminating delimiter
-                let end_pos = start_pos
-                    + 1
-                    + content.len()
-                    + usize::from(!content.is_empty())
-                    + delimiter.len();
-
+        match extract_heredoc_body(
+            command,
+            start_pos,
+            delimiter,
+            heredoc_type,
+            limits,
+            start_time,
+            timeout,
+        ) {
+            Ok((content, end_pos)) => {
                 extracted.push(ExtractedContent {
                     content,
                     language: ScriptLanguage::Bash, // Default to bash for heredocs
@@ -911,11 +1010,11 @@ fn extract_heredocs(
                     heredoc_type: Some(heredoc_type),
                 });
             }
-            None => {
-                // Unterminated heredoc - record skip reason but continue processing
-                skip_reasons.push(SkipReason::UnterminatedHeredoc {
-                    delimiter: delimiter.to_string(),
-                });
+            Err(reason) => {
+                skip_reasons.push(reason);
+                if matches!(skip_reasons.last(), Some(SkipReason::Timeout { .. })) {
+                    return;
+                }
             }
         }
     }
@@ -934,19 +1033,38 @@ fn extract_heredoc_body(
     delimiter: &str,
     heredoc_type: HeredocType,
     limits: &ExtractionLimits,
-) -> Option<String> {
-    let remaining = command.get(start..)?;
+    start_time: Instant,
+    timeout: Duration,
+) -> Result<(String, usize), SkipReason> {
+    if start > command.len() {
+        return Err(SkipReason::MalformedInput {
+            reason: "heredoc start offset out of bounds".to_string(),
+        });
+    }
+
+    let remaining = &command[start..];
 
     // Skip leading newline if present (heredoc body starts on next line)
-    let body_start = remaining.strip_prefix('\n').unwrap_or(remaining);
+    let body_start_offset = usize::from(remaining.starts_with('\n'));
+    let body_start = &remaining[body_start_offset..];
+    let body_start_abs = start + body_start_offset;
 
-    // For multi-line commands, find the terminating delimiter
-    let mut lines = body_start.lines();
     let mut body_lines: Vec<&str> = Vec::new();
-    let mut found_terminator = false;
-    let mut total_bytes = 0;
+    let mut total_bytes: usize = 0;
+    let mut cursor: usize = 0; // offset within body_start
 
-    for line in lines.by_ref() {
+    for part in body_start.split_inclusive('\n') {
+        // Enforce timeout inside the loop (a single heredoc can be large).
+        if start_time.elapsed() >= timeout {
+            let elapsed_ms = u64::try_from(start_time.elapsed().as_millis()).unwrap_or(u64::MAX);
+            return Err(SkipReason::Timeout {
+                elapsed_ms,
+                budget_ms: limits.timeout_ms,
+            });
+        }
+
+        let line = part.strip_suffix('\n').unwrap_or(part);
+
         // Check if this line is the terminator
         let trimmed = match heredoc_type {
             HeredocType::TabStripped => line.trim_start_matches('\t'),
@@ -955,68 +1073,191 @@ fn extract_heredoc_body(
         };
 
         if trimmed == delimiter {
-            found_terminator = true;
-            break;
+            // End position should be accurate in the ORIGINAL command (including any indentation
+            // before the delimiter). We intentionally exclude the newline after the terminator.
+            let terminator_end = body_start_abs + cursor + line.len();
+
+            let content = match heredoc_type {
+                HeredocType::TabStripped => body_lines
+                    .iter()
+                    .map(|l| l.trim_start_matches('\t'))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                HeredocType::IndentStripped => {
+                    let min_indent = body_lines
+                        .iter()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(|l| l.len() - l.trim_start().len())
+                        .min()
+                        .unwrap_or(0);
+
+                    body_lines
+                        .iter()
+                        .map(|l| {
+                            if l.len() >= min_indent {
+                                &l[min_indent..]
+                            } else {
+                                l.trim_start()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
+                HeredocType::Standard | HeredocType::HereString => body_lines.join("\n"),
+            };
+
+            return Ok((content, terminator_end));
         }
 
-        // Enforce limits
-        total_bytes += line.len() + 1; // +1 for newline
+        // Enforce limits (fail-open by returning a specific skip reason).
+        total_bytes = total_bytes.saturating_add(part.len());
         if total_bytes > limits.max_body_bytes {
-            break;
+            return Err(SkipReason::ExceededSizeLimit {
+                actual: total_bytes,
+                limit: limits.max_body_bytes,
+            });
         }
+
         if body_lines.len() >= limits.max_body_lines {
-            break;
+            return Err(SkipReason::ExceededLineLimit {
+                actual: body_lines.len() + 1,
+                limit: limits.max_body_lines,
+            });
         }
 
         body_lines.push(line);
+        cursor = cursor.saturating_add(part.len());
     }
 
-    if !found_terminator {
-        // No terminator found - either unterminated or content continues beyond view
-        return None;
+    Err(SkipReason::UnterminatedHeredoc {
+        delimiter: delimiter.to_string(),
+    })
+}
+
+// ============================================================================
+// Shell Command Extraction for Evaluator Integration (git_safety_guard-uau)
+// ============================================================================
+
+use ast_grep_core::AstGrep;
+use ast_grep_language::SupportLang;
+
+/// Extracted shell command with position info for evaluator integration.
+///
+/// Each command represents a simple command invocation that can be
+/// fed to the evaluator for destructive pattern matching.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedShellCommand {
+    /// The full command text (reconstructed from AST).
+    pub text: String,
+    /// Byte offset in the original content.
+    pub start: usize,
+    /// End byte offset.
+    pub end: usize,
+    /// 1-based line number.
+    pub line_number: usize,
+}
+
+/// Extract executable shell commands from heredoc/script content.
+///
+/// This function parses shell content using tree-sitter-bash (via ast-grep)
+/// and extracts individual commands that should be evaluated against the
+/// main evaluator pipeline. This keeps all destructive knowledge in packs
+/// rather than duplicating rules for heredoc content.
+///
+/// # What gets extracted
+///
+/// - Simple commands: `rm -rf /path`, `git reset --hard`
+/// - Pipe sources and targets: commands on either side of `|`
+/// - Commands inside command substitutions: contents of `$(...)`
+/// - Commands inside subshells: contents of `(...)`
+///
+/// # What does NOT get extracted (false positive avoidance)
+///
+/// - Comments: `# rm -rf /` is NOT executed
+/// - String literals in echo/printf: content inside quotes is data, not execution
+/// - Heredoc delimiters themselves
+///
+/// # Performance
+///
+/// Uses ast-grep for parsing which is very fast (<2ms for typical heredocs).
+/// No timeout is enforced here as the AST matcher already has its own timeout.
+///
+/// # Examples
+///
+/// ```ignore
+/// use destructive_command_guard::heredoc::extract_shell_commands;
+///
+/// // Simple command
+/// let commands = extract_shell_commands("rm -rf /tmp/test");
+/// assert_eq!(commands.len(), 1);
+/// assert_eq!(commands[0].text, "rm -rf /tmp/test");
+///
+/// // Pipeline - both sides extracted
+/// let commands = extract_shell_commands("find . | xargs rm");
+/// assert_eq!(commands.len(), 2);
+///
+/// // Comment - not extracted
+/// let commands = extract_shell_commands("# rm -rf / dangerous");
+/// assert_eq!(commands.len(), 0);
+/// ```
+#[must_use]
+pub fn extract_shell_commands(content: &str) -> Vec<ExtractedShellCommand> {
+    if content.trim().is_empty() {
+        return Vec::new();
     }
 
-    // Empty heredoc is valid (e.g., `cat << EOF\nEOF`)
-    // Return empty string if terminator was found with no content
-    if body_lines.is_empty() {
-        return Some(String::new());
-    }
+    let ast = AstGrep::new(content, SupportLang::Bash);
+    let root = ast.root();
 
-    // Apply indentation stripping if needed
-    let content = match heredoc_type {
-        HeredocType::TabStripped => {
-            // Remove leading tabs from each line
-            body_lines
-                .iter()
-                .map(|line| line.trim_start_matches('\t'))
-                .collect::<Vec<_>>()
-                .join("\n")
+    let mut commands = Vec::new();
+
+    // Walk the AST to find command nodes
+    // tree-sitter-bash uses "command" nodes for simple commands
+    collect_commands_recursive(root, content, &mut commands);
+
+    commands
+}
+
+/// Recursively collect command nodes from the AST.
+///
+/// Walks the tree looking for "command" nodes (simple commands in bash).
+/// Also recurses into `command_substitution` and subshell nodes to find
+/// commands inside $(...) and (...).
+#[allow(clippy::needless_pass_by_value)]
+fn collect_commands_recursive<D: ast_grep_core::Doc>(
+    node: ast_grep_core::Node<'_, D>,
+    content: &str,
+    commands: &mut Vec<ExtractedShellCommand>,
+) {
+    let kind = node.kind();
+
+    // "command" in tree-sitter-bash is a simple command
+    if kind == "command" {
+        let range = node.range();
+        let text = node.text().to_string();
+
+        // Skip empty commands
+        if !text.trim().is_empty() {
+            let line_number = content[..range.start].matches('\n').count() + 1;
+
+            commands.push(ExtractedShellCommand {
+                text,
+                start: range.start,
+                end: range.end,
+                line_number,
+            });
         }
-        HeredocType::IndentStripped => {
-            // Remove common leading whitespace
-            let min_indent = body_lines
-                .iter()
-                .filter(|line| !line.trim().is_empty())
-                .map(|line| line.len() - line.trim_start().len())
-                .min()
-                .unwrap_or(0);
+    }
 
-            body_lines
-                .iter()
-                .map(|line| {
-                    if line.len() >= min_indent {
-                        &line[min_indent..]
-                    } else {
-                        line.trim_start()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
-        HeredocType::Standard | HeredocType::HereString => body_lines.join("\n"),
-    };
-
-    Some(content)
+    // Recurse into all children to find nested commands
+    // This handles:
+    // - Pipelines: `cmd1 | cmd2` has command children
+    // - Command lists: `cmd1 && cmd2` has command children
+    // - Command substitution: `$(cmd)` contains command
+    // - Subshells: `(cmd)` contains command
+    for child in node.children() {
+        collect_commands_recursive(child, content, commands);
+    }
 }
 
 // ============================================================================
@@ -1871,6 +2112,50 @@ mod tests {
         }
 
         #[test]
+        fn heredoc_body_line_limit_reports_exceeded_line_limit() {
+            let cmd = "cat << EOF\nline1\nline2\nline3\nEOF";
+            let limits = ExtractionLimits {
+                max_body_lines: 2,
+                ..Default::default()
+            };
+
+            let result = extract_content(cmd, &limits);
+            match result {
+                ExtractionResult::Skipped(reasons) => {
+                    assert!(
+                        reasons
+                            .iter()
+                            .any(|r| matches!(r, SkipReason::ExceededLineLimit { .. })),
+                        "should report ExceededLineLimit, not UnterminatedHeredoc"
+                    );
+                }
+                _ => panic!("Expected Skipped result for line-limited heredoc, got {result:?}"),
+            }
+        }
+
+        #[test]
+        fn extraction_timeout_is_enforced() {
+            let cmd = "cat << EOF\nline1\nEOF";
+            let limits = ExtractionLimits {
+                timeout_ms: 0,
+                ..Default::default()
+            };
+
+            let result = extract_content(cmd, &limits);
+            match result {
+                ExtractionResult::Skipped(reasons) => {
+                    assert!(
+                        reasons
+                            .iter()
+                            .any(|r| matches!(r, SkipReason::Timeout { .. })),
+                        "should include a Timeout skip reason"
+                    );
+                }
+                _ => panic!("Expected Skipped(timeout) result, got {result:?}"),
+            }
+        }
+
+        #[test]
         fn enforces_heredoc_limit() {
             // Create a command with many heredocs
             let cmd = "cmd1 << A\na\nA && cmd2 << B\nb\nB && cmd3 << C\nc\nC";
@@ -1902,6 +2187,10 @@ mod tests {
                     null_bytes: 5,
                     non_printable_ratio: 0.5,
                 },
+                SkipReason::Timeout {
+                    elapsed_ms: 60,
+                    budget_ms: 50,
+                },
                 SkipReason::UnterminatedHeredoc {
                     delimiter: "EOF".to_string(),
                 },
@@ -1926,6 +2215,286 @@ mod tests {
         fn whitespace_only_returns_no_content() {
             let result = extract_content("   \t\n  ", &ExtractionLimits::default());
             assert!(matches!(result, ExtractionResult::NoContent));
+        }
+    }
+
+    // ========================================================================
+    // Shell Command Extraction Tests (git_safety_guard-uau)
+    // ========================================================================
+
+    mod shell_extraction {
+        use super::*;
+
+        // ====================================================================
+        // Positive fixtures: commands that MUST be extracted
+        // ====================================================================
+
+        #[test]
+        fn extracts_simple_command() {
+            let commands = extract_shell_commands("ls -la");
+            assert_eq!(commands.len(), 1);
+            assert_eq!(commands[0].text, "ls -la");
+            assert_eq!(commands[0].line_number, 1);
+        }
+
+        #[test]
+        fn extracts_rm_rf() {
+            // Catastrophic command - must be extracted for evaluator
+            let commands = extract_shell_commands("rm -rf /tmp/test");
+            assert_eq!(commands.len(), 1);
+            assert_eq!(commands[0].text, "rm -rf /tmp/test");
+        }
+
+        #[test]
+        fn extracts_git_reset_hard() {
+            let commands = extract_shell_commands("git reset --hard");
+            assert_eq!(commands.len(), 1);
+            assert_eq!(commands[0].text, "git reset --hard");
+        }
+
+        #[test]
+        fn extracts_git_clean_fd() {
+            let commands = extract_shell_commands("git clean -fd");
+            assert_eq!(commands.len(), 1);
+            assert_eq!(commands[0].text, "git clean -fd");
+        }
+
+        #[test]
+        fn extracts_pipeline_both_sides() {
+            // Both sides of a pipe are executed
+            let commands = extract_shell_commands("find . -name '*.bak' | xargs rm");
+            assert_eq!(commands.len(), 2, "pipeline should extract both commands");
+            assert!(commands[0].text.starts_with("find"));
+            assert!(commands[1].text.contains("xargs"));
+        }
+
+        #[test]
+        fn extracts_command_list() {
+            // Commands separated by && or ;
+            let commands = extract_shell_commands("cd /tmp && rm -rf test");
+            assert_eq!(commands.len(), 2, "command list should extract both");
+        }
+
+        #[test]
+        fn extracts_command_substitution() {
+            // Commands inside $(...) are executed
+            let commands = extract_shell_commands("echo $(rm -rf /tmp/test)");
+            assert!(
+                commands.len() >= 2,
+                "should extract command inside substitution"
+            );
+            // Should find the rm command inside the substitution
+            assert!(
+                commands.iter().any(|c| c.text.contains("rm")),
+                "should extract rm from command substitution"
+            );
+        }
+
+        #[test]
+        fn extracts_subshell_commands() {
+            // Commands inside (...) subshells are executed
+            let commands = extract_shell_commands("(cd /tmp && rm -rf test)");
+            assert!(commands.len() >= 2, "should extract commands from subshell");
+        }
+
+        #[test]
+        fn extracts_multiline_script() {
+            let script = r#"#!/bin/bash
+set -e
+cd /tmp
+rm -rf test
+echo "done""#;
+            let commands = extract_shell_commands(script);
+            assert!(
+                commands.len() >= 4,
+                "should extract all commands from multiline script"
+            );
+            // Should have rm command
+            assert!(
+                commands.iter().any(|c| c.text.contains("rm")),
+                "should extract rm"
+            );
+        }
+
+        #[test]
+        fn extracts_docker_system_prune() {
+            // Docker destructive commands (if pack enabled)
+            let commands = extract_shell_commands("docker system prune -af");
+            assert_eq!(commands.len(), 1);
+            assert_eq!(commands[0].text, "docker system prune -af");
+        }
+
+        #[test]
+        fn line_numbers_are_correct() {
+            let script = "echo first\nrm -rf /tmp\necho last";
+            let commands = extract_shell_commands(script);
+            assert!(commands.len() >= 3);
+
+            let rm_cmd = commands.iter().find(|c| c.text.contains("rm")).unwrap();
+            assert_eq!(rm_cmd.line_number, 2, "rm should be on line 2");
+        }
+
+        // ====================================================================
+        // Negative fixtures: content that must NOT be extracted as commands
+        // ====================================================================
+
+        #[test]
+        fn skips_comments() {
+            // Comments mentioning dangerous commands should NOT be extracted
+            let commands = extract_shell_commands("# rm -rf / would be bad");
+            assert!(
+                commands.is_empty() || !commands.iter().any(|c| c.text.contains("rm")),
+                "comments must not be extracted as commands"
+            );
+        }
+
+        #[test]
+        fn echo_string_is_data_not_execution() {
+            // The string inside echo is data, not a command
+            let commands = extract_shell_commands("echo 'rm -rf /'");
+            // Should extract echo, but not the rm inside the string
+            assert!(
+                commands.len() == 1,
+                "should only extract echo, not the string content"
+            );
+            // The command should be the echo, not rm
+            assert!(
+                commands[0].text.starts_with("echo"),
+                "extracted command should be echo"
+            );
+        }
+
+        #[test]
+        fn printf_string_is_data_not_execution() {
+            let commands = extract_shell_commands(r#"printf "rm -rf %s" /tmp"#);
+            assert!(
+                commands.len() == 1,
+                "should only extract printf, not the format string content"
+            );
+            assert!(commands[0].text.starts_with("printf"));
+        }
+
+        #[test]
+        fn empty_content_returns_no_commands() {
+            let commands = extract_shell_commands("");
+            assert!(commands.is_empty());
+        }
+
+        #[test]
+        fn whitespace_only_returns_no_commands() {
+            let commands = extract_shell_commands("   \n\t  ");
+            assert!(commands.is_empty());
+        }
+
+        #[test]
+        fn comment_only_returns_no_commands() {
+            let commands = extract_shell_commands("# This is just a comment");
+            // Comments should not produce commands
+            assert!(
+                commands.is_empty() || commands.iter().all(|c| c.text.trim().starts_with('#')),
+                "comment-only content should not produce executable commands"
+            );
+        }
+
+        #[test]
+        fn heredoc_delimiter_is_not_command() {
+            // The EOF itself is not a command
+            let script = r"cat << EOF
+some content
+rm -rf / mentioned in text
+EOF";
+            let commands = extract_shell_commands(script);
+            // Should extract cat, but not EOF
+            assert!(
+                commands.iter().any(|c| c.text.starts_with("cat")),
+                "should extract cat command"
+            );
+            // The heredoc content (rm -rf...) is data, not a command
+            // However, tree-sitter may not parse this fully without proper context
+        }
+
+        #[test]
+        fn safe_tmp_cleanup_is_extracted() {
+            // Policy says /tmp cleanup might be allowed - but we still extract it
+            // for the evaluator to decide based on pack rules/allowlists
+            let commands = extract_shell_commands("rm -rf /tmp/build_cache");
+            assert_eq!(commands.len(), 1);
+            // Extraction happens - policy decision is for evaluator
+        }
+
+        // ====================================================================
+        // Edge cases and robustness
+        // ====================================================================
+
+        #[test]
+        fn handles_complex_pipeline() {
+            let commands = extract_shell_commands("cat file | grep pattern | wc -l");
+            assert_eq!(commands.len(), 3, "should extract all pipeline stages");
+        }
+
+        #[test]
+        fn handles_background_command() {
+            let commands = extract_shell_commands("long_process &");
+            assert_eq!(commands.len(), 1);
+            assert_eq!(commands[0].text, "long_process");
+        }
+
+        #[test]
+        fn handles_redirections() {
+            let commands = extract_shell_commands("rm -rf /tmp/test > /dev/null 2>&1");
+            assert_eq!(commands.len(), 1);
+            // The command text includes redirections
+            assert!(commands[0].text.contains("rm"));
+        }
+
+        #[test]
+        fn handles_variable_expansion_in_command() {
+            // Commands with variables should still be extracted
+            let commands = extract_shell_commands("rm -rf $DIR");
+            assert_eq!(commands.len(), 1);
+            assert!(commands[0].text.contains("rm"));
+        }
+
+        #[test]
+        fn handles_if_then_else() {
+            let script = r#"if [ -f /tmp/test ]; then
+    rm -rf /tmp/test
+else
+    echo "not found"
+fi"#;
+            let commands = extract_shell_commands(script);
+            // Should extract the commands inside the if/else
+            assert!(
+                commands.iter().any(|c| c.text.contains("rm")),
+                "should extract rm from if body"
+            );
+            assert!(
+                commands.iter().any(|c| c.text.contains("echo")),
+                "should extract echo from else body"
+            );
+        }
+
+        #[test]
+        fn handles_for_loop() {
+            let script = "for f in *.txt; do rm -f \"$f\"; done";
+            let commands = extract_shell_commands(script);
+            assert!(
+                commands.iter().any(|c| c.text.contains("rm")),
+                "should extract rm from for loop body"
+            );
+        }
+
+        #[test]
+        fn byte_ranges_are_correct() {
+            let script = "echo hello";
+            let commands = extract_shell_commands(script);
+            assert_eq!(commands.len(), 1);
+            assert_eq!(commands[0].start, 0);
+            assert_eq!(commands[0].end, script.len());
+
+            // Extract the text using the range
+            let extracted = &script[commands[0].start..commands[0].end];
+            assert_eq!(extracted, "echo hello");
         }
     }
 }

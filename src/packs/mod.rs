@@ -872,6 +872,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn database_packs_block_drop_with_if_exists() {
+        let pg = database::postgresql::create_pack();
+        assert!(
+            pg.check("DROP TABLE IF EXISTS foo;").is_some(),
+            "DROP TABLE IF EXISTS should be treated as destructive"
+        );
+        assert!(
+            pg.check("DROP DATABASE IF EXISTS foo;").is_some(),
+            "DROP DATABASE IF EXISTS should be treated as destructive"
+        );
+
+        let sqlite = database::sqlite::create_pack();
+        assert!(
+            sqlite.check("DROP TABLE IF EXISTS foo;").is_some(),
+            "SQLite DROP TABLE IF EXISTS should be treated as destructive"
+        );
+    }
+
+    #[test]
+    fn database_postgresql_blocks_truncate_restart_identity() {
+        let pg = database::postgresql::create_pack();
+        assert!(
+            pg.check("TRUNCATE TABLE foo RESTART IDENTITY;").is_some(),
+            "TRUNCATE ... RESTART IDENTITY permanently deletes rows and should be blocked"
+        );
+    }
+
     /// Test category expansion produces ordered results.
     #[test]
     fn category_expansion_is_ordered() {

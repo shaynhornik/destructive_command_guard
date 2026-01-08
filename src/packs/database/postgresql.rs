@@ -25,16 +25,6 @@ pub fn create_pack() -> Pack {
 
 fn create_safe_patterns() -> Vec<SafePattern> {
     vec![
-        // DROP with IF EXISTS is safer (won't error if not exists)
-        safe_pattern!(
-            "drop-if-exists",
-            r"(?i)DROP\s+(?:TABLE|DATABASE|SCHEMA|INDEX|VIEW|SEQUENCE)\s+IF\s+EXISTS"
-        ),
-        // TRUNCATE with RESTART IDENTITY is often intentional cleanup
-        safe_pattern!(
-            "truncate-restart-identity",
-            r"(?i)TRUNCATE\s+.*RESTART\s+IDENTITY"
-        ),
         // pg_dump without --clean is safe (backup only)
         safe_pattern!("pg-dump-no-clean", r"pg_dump\s+(?!.*--clean)(?!.*-c\b)"),
         // psql with --dry-run or explain
@@ -49,20 +39,20 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // DROP DATABASE
         destructive_pattern!(
             "drop-database",
-            r"(?i)DROP\s+DATABASE\s+(?!IF\s+EXISTS)",
-            "DROP DATABASE permanently deletes the entire database. Consider using IF EXISTS or backing up first."
+            r"(?i)\bDROP\s+DATABASE\b",
+            "DROP DATABASE permanently deletes the entire database (even with IF EXISTS). Verify and back up first."
         ),
-        // DROP TABLE without IF EXISTS
+        // DROP TABLE
         destructive_pattern!(
             "drop-table",
-            r"(?i)DROP\s+TABLE\s+(?!IF\s+EXISTS)",
-            "DROP TABLE permanently deletes the table. Consider using IF EXISTS or backing up first."
+            r"(?i)\bDROP\s+TABLE\b",
+            "DROP TABLE permanently deletes the table (even with IF EXISTS). Verify and back up first."
         ),
         // DROP SCHEMA
         destructive_pattern!(
             "drop-schema",
-            r"(?i)DROP\s+SCHEMA\s+(?!IF\s+EXISTS)",
-            "DROP SCHEMA permanently deletes the schema and all its objects."
+            r"(?i)\bDROP\s+SCHEMA\b",
+            "DROP SCHEMA permanently deletes the schema and all its objects (even with IF EXISTS)."
         ),
         // TRUNCATE (faster than DELETE, no rollback)
         destructive_pattern!(

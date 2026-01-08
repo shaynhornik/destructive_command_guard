@@ -455,8 +455,15 @@ test_command_with_packs "kubectl get pods" "allow" "kubernetes.kubectl" "kubectl
 
 # PostgreSQL pack tests
 test_command_with_packs "psql -c 'DROP DATABASE production;'" "block" "database.postgresql" "psql DROP DATABASE (postgresql pack enabled)"
+test_command_with_packs "psql -c 'DROP DATABASE IF EXISTS production;'" "block" "database.postgresql" "psql DROP DATABASE IF EXISTS (postgresql pack enabled)"
+test_command_with_packs "psql -c 'DROP TABLE IF EXISTS users;'" "block" "database.postgresql" "psql DROP TABLE IF EXISTS (postgresql pack enabled)"
+test_command_with_packs "psql -c 'TRUNCATE TABLE users RESTART IDENTITY;'" "block" "database.postgresql" "psql TRUNCATE ... RESTART IDENTITY (postgresql pack enabled)"
 test_command_with_packs "psql -c 'DELETE FROM users;'" "block" "database.postgresql" "psql DELETE without WHERE (postgresql pack enabled)"
 test_command_with_packs "psql -c 'SELECT 1;'" "allow" "database.postgresql" "psql SELECT (postgresql pack enabled, safe command)"
+
+# SQLite pack tests
+test_command_with_packs "sqlite3 my.db 'DROP TABLE IF EXISTS users;'" "block" "database.sqlite" "sqlite3 DROP TABLE IF EXISTS (sqlite pack enabled)"
+test_command_with_packs "sqlite3 my.db 'SELECT 1;'" "allow" "database.sqlite" "sqlite3 SELECT (sqlite pack enabled, safe command)"
 
 # Redis pack tests
 test_command_with_packs "redis-cli FLUSHALL" "block" "database.redis" "redis-cli FLUSHALL (redis pack enabled)"
