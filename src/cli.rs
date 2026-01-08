@@ -889,8 +889,16 @@ fn handle_scan(
 
 /// Get list of files staged for commit (git index).
 fn get_staged_files() -> Result<Vec<std::path::PathBuf>, Box<dyn std::error::Error>> {
+    ensure_git_repo()?;
+
     let output = std::process::Command::new("git")
-        .args(["diff", "--cached", "--name-only", "--diff-filter=ACMR"])
+        .args([
+            "diff",
+            "--cached",
+            "--name-status",
+            "-z",
+            "--diff-filter=ACMR",
+        ])
         .output()?;
 
     if !output.status.success() {
@@ -898,37 +906,88 @@ fn get_staged_files() -> Result<Vec<std::path::PathBuf>, Box<dyn std::error::Err
         return Err(format!("git diff --cached failed: {stderr}").into());
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let paths: Vec<std::path::PathBuf> = stdout
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(std::path::PathBuf::from)
-        .collect();
-
-    Ok(paths)
+    Ok(parse_git_name_status_z(&output.stdout))
 }
 
 /// Get list of files changed in a git diff range.
 fn get_git_diff_files(
     rev_range: &str,
 ) -> Result<Vec<std::path::PathBuf>, Box<dyn std::error::Error>> {
+    ensure_git_repo()?;
+
     let output = std::process::Command::new("git")
-        .args(["diff", "--name-only", "--diff-filter=ACMR", rev_range])
+        .args([
+            "diff",
+            "--name-status",
+            "-z",
+            "--diff-filter=ACMR",
+            rev_range,
+        ])
         .output()?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git diff --name-only failed: {stderr}").into());
+        return Err(format!("git diff --name-status failed: {stderr}").into());
+    }
+
+    Ok(parse_git_name_status_z(&output.stdout))
+}
+
+fn ensure_git_repo() -> Result<(), Box<dyn std::error::Error>> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Not a git repository: {stderr}").into());
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let paths: Vec<std::path::PathBuf> = stdout
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(std::path::PathBuf::from)
-        .collect();
+    if stdout.trim() != "true" {
+        return Err("Not inside a git work tree".into());
+    }
 
-    Ok(paths)
+    Ok(())
+}
+
+fn parse_git_name_status_z(stdout: &[u8]) -> Vec<std::path::PathBuf> {
+    use std::collections::BTreeSet;
+
+    let mut set: BTreeSet<String> = BTreeSet::new();
+    let mut it = stdout.split(|b| *b == 0).filter(|s| !s.is_empty());
+
+    while let Some(status_bytes) = it.next() {
+        let status = String::from_utf8_lossy(status_bytes);
+        let Some(kind) = status.chars().next() else {
+            continue;
+        };
+
+        match kind {
+            // Renames/copies: status, old path, new path
+            'R' | 'C' => {
+                let _old = it.next();
+                let new = it.next();
+                if let Some(new) = new {
+                    set.insert(String::from_utf8_lossy(new).to_string());
+                }
+            }
+            // Added/modified: status, path
+            'A' | 'M' => {
+                if let Some(path) = it.next() {
+                    set.insert(String::from_utf8_lossy(path).to_string());
+                }
+            }
+            // Fallback: assume status + one path
+            _ => {
+                if let Some(path) = it.next() {
+                    set.insert(String::from_utf8_lossy(path).to_string());
+                }
+            }
+        }
+    }
+
+    set.into_iter().map(std::path::PathBuf::from).collect()
 }
 
 /// Filter paths by include/exclude glob patterns.
