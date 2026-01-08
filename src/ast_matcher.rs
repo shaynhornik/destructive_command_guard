@@ -832,4 +832,32 @@ mod tests {
             Err(e) => panic!("unexpected error: {e}"),
         }
     }
+
+    #[test]
+    fn bash_positive_match() {
+        let matcher = AstMatcher::new();
+        let code = "rm -rf /tmp/dangerous";
+
+        let matches = matcher.find_matches(code, ScriptLanguage::Bash);
+        match matches {
+            Ok(m) => {
+                assert!(!m.is_empty(), "should match rm -rf");
+                assert!(m[0].rule_id.contains("bash"));
+                assert!(m[0].severity.blocks_by_default());
+            }
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
+
+    #[test]
+    fn bash_negative_match() {
+        let matcher = AstMatcher::new();
+        let code = "echo 'hello world'";
+
+        let matches = matcher.find_matches(code, ScriptLanguage::Bash);
+        match matches {
+            Ok(m) => assert!(m.is_empty(), "should not match safe code"),
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
 }
