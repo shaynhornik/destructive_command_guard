@@ -114,6 +114,28 @@ log_section() {
     echo -e "${BOLD}${BLUE}=== $title ===${NC}"
 }
 
+# Truncate long commands for readable logs.
+truncate_cmd() {
+    local s="$1"
+    local max=160
+    if [[ ${#s} -le $max ]]; then
+        echo -n "$s"
+    else
+        echo -n "${s:0:$max}..."
+    fi
+}
+
+# JSON-escape a string for safe embedding in a JSON string literal.
+json_escape() {
+    local s="$1"
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//$'\n'/\\n}
+    s=${s//$'\r'/\\r}
+    s=${s//$'\t'/\\t}
+    echo -n "$s"
+}
+
 # Test helper: run command and check result
 test_command() {
     local cmd="$1"
@@ -121,10 +143,15 @@ test_command() {
     local desc="$3"
 
     log_test_start "$desc"
+    if $VERBOSE; then
+        echo -e "  ${CYAN}Command:${NC} $(truncate_cmd "$cmd")"
+    fi
 
     # Create JSON input and base64 encode it to avoid interference from
     # any existing git safety hooks that might scan command arguments
-    local json="{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"$cmd\"}}"
+    local escaped_cmd
+    escaped_cmd=$(json_escape "$cmd")
+    local json="{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"$escaped_cmd\"}}"
     local encoded
     encoded=$(echo -n "$json" | base64 -w 0)
 
@@ -144,7 +171,7 @@ test_command() {
             fi
         fi
         log_fail "Should BLOCK: $desc" "JSON with permissionDecision: deny" "${result:-<empty>}"
-        return 1
+        return 0
     else
         # Expected: allow (empty output)
         if [[ -z "$result" ]]; then
@@ -152,7 +179,7 @@ test_command() {
             return 0
         else
             log_fail "Should ALLOW: $desc" "<empty output>" "$result"
-            return 1
+            return 0
         fi
     fi
 }
@@ -163,6 +190,9 @@ test_non_bash_tool() {
     local desc="$2"
 
     log_test_start "$desc"
+    if $VERBOSE; then
+        echo -e "  ${CYAN}Tool:${NC} $tool"
+    fi
 
     # Use a harmless command to avoid hook interference
     local json="{\"tool_name\":\"$tool\",\"tool_input\":{\"command\":\"echo test\"}}"
@@ -176,7 +206,7 @@ test_non_bash_tool() {
         return 0
     else
         log_fail "Non-Bash tool should be ignored: $desc" "<empty output>" "$result"
-        return 1
+        return 0
     fi
 }
 
@@ -200,7 +230,7 @@ test_malformed_input() {
         return 0
     else
         log_fail "Malformed input should be ignored: $desc" "<empty output>" "$result"
-        return 1
+        return 0
     fi
 }
 
@@ -213,9 +243,15 @@ test_command_with_packs() {
     local desc="$4"
 
     log_test_start "$desc"
+    if $VERBOSE; then
+        echo -e "  ${CYAN}Packs:${NC} $packs"
+        echo -e "  ${CYAN}Command:${NC} $(truncate_cmd "$cmd")"
+    fi
 
     # Create JSON input and base64 encode it
-    local json="{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"$cmd\"}}"
+    local escaped_cmd
+    escaped_cmd=$(json_escape "$cmd")
+    local json="{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"$escaped_cmd\"}}"
     local encoded
     encoded=$(echo -n "$json" | base64 -w 0)
 
@@ -235,7 +271,7 @@ test_command_with_packs() {
             fi
         fi
         log_fail "Should BLOCK with pack=$packs: $desc" "JSON with permissionDecision: deny" "${result:-<empty>}"
-        return 1
+        return 0
     else
         # Expected: allow (empty output)
         if [[ -z "$result" ]]; then
@@ -243,7 +279,7 @@ test_command_with_packs() {
             return 0
         else
             log_fail "Should ALLOW with pack=$packs: $desc" "<empty output>" "$result"
-            return 1
+            return 0
         fi
     fi
 }
@@ -437,6 +473,31 @@ test_command_with_packs "kubectl delete namespace foo" "block" "containers.docke
 # Verify commands WITHOUT their pack enabled are allowed (quick reject works)
 test_command "docker system prune" "allow" "docker system prune (no docker pack, quick reject)"
 test_command "kubectl delete namespace foo" "allow" "kubectl delete namespace (no kubectl pack, quick reject)"
+
+log_section "Execution Context Regression Tests (git_safety_guard-t8x.3)"
+
+# Must ALLOW (data contexts)
+test_command 'bd create --description="This pattern blocks rm -rf"' "allow" "bd create --description contains rm -rf (data context)"
+test_command 'bd update git_safety_guard-99e --notes "example: git reset --hard"' "allow" "bd update --notes contains git reset --hard (data context)"
+test_command 'git commit -m "Fix git push --force detection"' "allow" "git commit -m contains git push --force (data context)"
+test_command 'git tag -m "Document rm -rf" v1.2.3' "allow" "git tag -m contains rm -rf (data context)"
+test_command 'echo "example: kubectl delete namespace prod"' "allow" "echo contains kubectl delete namespace (data context)"
+test_command 'rg -n "rm -rf" src/main.rs' "allow" "rg positional pattern contains rm -rf (data context)"
+test_command 'grep -e "DROP TABLE" schema.sql' "allow" "grep -e contains DROP TABLE (data context)"
+
+# Must BLOCK (executed contexts)
+test_command 'bash -c "rm -rf /"' "block" "bash -c executes rm -rf /"
+test_command 'echo hi | bash -c "rm -rf /"' "block" "pipe to bash -c executes rm -rf /"
+test_command "python -c \"import os; os.system('rm -rf /')\"" "block" "python -c executes rm -rf /"
+test_command "node -e \"require('child_process').execSync('rm -rf /')\"" "block" "node -e executes rm -rf /"
+test_command 'echo $(rm -rf /tmp/foo)' "block" "command substitution executes rm -rf"
+test_command 'echo `rm -rf /tmp/foo`' "block" "backticks substitution executes rm -rf"
+
+# Edge cases: wrappers/prefixes
+test_command 'sudo git commit -m "Fix rm -rf detection"' "allow" "sudo git commit -m contains rm -rf (data context)"
+test_command 'FOO=1 git commit -m "Fix rm -rf detection"' "allow" "env assignment + git commit -m contains rm -rf (data context)"
+test_command 'sudo bash -c "rm -rf /"' "block" "sudo bash -c executes rm -rf /"
+test_command 'env FOO=1 bash -c "rm -rf /"' "block" "env VAR=... bash -c executes rm -rf /"
 
 #
 # SUMMARY
