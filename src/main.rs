@@ -395,24 +395,6 @@ fn main() {
     // Configure colors based on TTY detection
     configure_colors();
 
-    // Try to parse CLI arguments
-    let cli = Cli::try_parse();
-
-    // If CLI parsing succeeds and there's a subcommand, handle it
-    if let Ok(cli) = cli {
-        if cli.command.is_some() {
-            if let Err(e) = cli::run_command(cli) {
-                // If the error is "no subcommand provided", fall through to hook mode
-                if e.to_string() != "No subcommand provided. Running in hook mode." {
-                    eprintln!("Error: {e}");
-                    std::process::exit(1);
-                }
-            } else {
-                return;
-            }
-        }
-    }
-
     // Check for --version flag (useful when run directly, not as hook)
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
@@ -423,6 +405,26 @@ fn main() {
     // Check for --help flag
     if args.iter().any(|a| a == "--help" || a == "-h") {
         print_help();
+        return;
+    }
+
+    // Parse CLI arguments (subcommands). If parsing fails (e.g., unknown flags),
+    // print the clap error and exit instead of falling into hook mode and
+    // blocking on stdin.
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
+
+    // If there's a subcommand, handle it and exit.
+    if cli.command.is_some() {
+        if let Err(e) = cli::run_command(cli) {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
         return;
     }
 
