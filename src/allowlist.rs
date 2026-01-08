@@ -192,10 +192,20 @@ impl LayeredAllowlist {
     }
 
     /// Find the first matching rule entry across layers (project > user > system).
+    ///
+    /// Note: This performs exact rule ID matching without wildcard expansion.
+    /// Use `match_rule` for wildcard-aware matching.
+    ///
+    /// Skips entries that are expired, have unmet conditions, or lack risk ack.
     #[must_use]
     pub fn lookup_rule(&self, rule: &RuleId) -> Option<(&AllowEntry, AllowlistLayer)> {
         for layer in &self.layers {
             for entry in &layer.file.entries {
+                // Skip invalid entries
+                if !is_entry_valid(entry) {
+                    continue;
+                }
+
                 if let AllowSelector::Rule(rule_id) = &entry.selector {
                     if rule_id == rule {
                         return Some((entry, layer.layer));
@@ -211,6 +221,11 @@ impl LayeredAllowlist {
     /// Matching supports:
     /// - Exact rule IDs: `core.git:reset-hard`
     /// - Pack-scoped wildcard: `core.git:*` (matches any pattern in that pack)
+    ///
+    /// An entry is skipped if:
+    /// - It has expired (`expires_at` is in the past)
+    /// - Its conditions are not met (env vars don't match)
+    /// - It's a regex pattern without `risk_acknowledged = true`
     #[must_use]
     pub fn match_rule(&self, pack_id: &str, pattern_name: &str) -> Option<AllowlistHit<'_>> {
         if pack_id == "*" {
@@ -220,6 +235,11 @@ impl LayeredAllowlist {
 
         for layer in &self.layers {
             for entry in &layer.file.entries {
+                // Skip entries that are expired, have unmet conditions, or lack risk ack
+                if !is_entry_valid(entry) {
+                    continue;
+                }
+
                 let AllowSelector::Rule(rule_id) = &entry.selector else {
                     continue;
                 };
@@ -246,6 +266,90 @@ impl LayeredAllowlist {
 pub struct AllowlistHit<'a> {
     pub layer: AllowlistLayer,
     pub entry: &'a AllowEntry,
+}
+
+// ============================================================================
+// Entry validity checks (expiration, conditions, risk acknowledgement)
+// ============================================================================
+
+/// Check if an allowlist entry has expired.
+///
+/// Returns `true` if the entry has an `expires_at` timestamp that is in the past.
+/// Returns `false` if there's no expiration or the timestamp can't be parsed.
+///
+/// # Panics
+///
+/// This function will not panic in practice. The `.expect()` on `and_hms_opt(0, 0, 0)`
+/// is safe because midnight (00:00:00) is always a valid time.
+#[must_use]
+pub fn is_expired(entry: &AllowEntry) -> bool {
+    let Some(ref expires_at) = entry.expires_at else {
+        return false;
+    };
+
+    // Try RFC 3339 first (e.g., "2030-01-01T00:00:00Z" or "2030-01-01T00:00:00+00:00")
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(expires_at) {
+        return dt < chrono::Utc::now();
+    }
+
+    // Try ISO 8601 without timezone (treat as UTC)
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(expires_at, "%Y-%m-%dT%H:%M:%S") {
+        let utc = dt.and_utc();
+        return utc < chrono::Utc::now();
+    }
+
+    // Try date only (YYYY-MM-DD) - treat as midnight UTC
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(expires_at, "%Y-%m-%d") {
+        let midnight = date.and_hms_opt(0, 0, 0).expect("valid time").and_utc();
+        return midnight < chrono::Utc::now();
+    }
+
+    // Invalid timestamp format - treat as not expired (fail open)
+    false
+}
+
+/// Check if all conditions on an allowlist entry are satisfied.
+///
+/// Conditions are a map of `KEY=VALUE` pairs that must match environment variables.
+/// All conditions must be satisfied (AND logic).
+/// Missing env var means condition is not met.
+#[must_use]
+pub fn conditions_met(entry: &AllowEntry) -> bool {
+    if entry.conditions.is_empty() {
+        return true;
+    }
+
+    for (key, expected_value) in &entry.conditions {
+        match std::env::var(key) {
+            Ok(actual_value) if actual_value == *expected_value => {}
+            _ => return false,
+        }
+    }
+
+    true
+}
+
+/// Check if a regex pattern entry has required risk acknowledgement.
+///
+/// Regex patterns are dangerous because they can accidentally allow too much.
+/// Entries using `pattern` selector must have `risk_acknowledged = true`.
+#[must_use]
+pub const fn has_required_risk_ack(entry: &AllowEntry) -> bool {
+    match &entry.selector {
+        AllowSelector::RegexPattern(_) => entry.risk_acknowledged,
+        _ => true, // Non-regex entries don't need acknowledgement
+    }
+}
+
+/// Check if an allowlist entry is valid for matching.
+///
+/// An entry is valid if:
+/// - It hasn't expired
+/// - All conditions are met
+/// - Required risk acknowledgement is present (for regex patterns)
+#[must_use]
+pub fn is_entry_valid(entry: &AllowEntry) -> bool {
+    !is_expired(entry) && conditions_met(entry) && has_required_risk_ack(entry)
 }
 
 /// Load allowlist files using the default locations.

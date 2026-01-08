@@ -889,12 +889,21 @@ fn handle_scan(
 
 /// Get list of files staged for commit (git index).
 fn get_staged_files() -> Result<Vec<std::path::PathBuf>, Box<dyn std::error::Error>> {
-    ensure_git_repo()?;
+    let cwd = std::env::current_dir()?;
+    get_staged_files_at(&cwd)
+}
+
+fn get_staged_files_at(
+    cwd: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>, Box<dyn std::error::Error>> {
+    ensure_git_repo(cwd)?;
 
     let output = std::process::Command::new("git")
+        .current_dir(cwd)
         .args([
             "diff",
             "--cached",
+            "-M",
             "--name-status",
             "-z",
             "--diff-filter=ACMR",
@@ -913,11 +922,21 @@ fn get_staged_files() -> Result<Vec<std::path::PathBuf>, Box<dyn std::error::Err
 fn get_git_diff_files(
     rev_range: &str,
 ) -> Result<Vec<std::path::PathBuf>, Box<dyn std::error::Error>> {
-    ensure_git_repo()?;
+    let cwd = std::env::current_dir()?;
+    get_git_diff_files_at(&cwd, rev_range)
+}
+
+fn get_git_diff_files_at(
+    cwd: &std::path::Path,
+    rev_range: &str,
+) -> Result<Vec<std::path::PathBuf>, Box<dyn std::error::Error>> {
+    ensure_git_repo(cwd)?;
 
     let output = std::process::Command::new("git")
+        .current_dir(cwd)
         .args([
             "diff",
+            "-M",
             "--name-status",
             "-z",
             "--diff-filter=ACMR",
@@ -933,8 +952,9 @@ fn get_git_diff_files(
     Ok(parse_git_name_status_z(&output.stdout))
 }
 
-fn ensure_git_repo() -> Result<(), Box<dyn std::error::Error>> {
+fn ensure_git_repo(cwd: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let output = std::process::Command::new("git")
+        .current_dir(cwd)
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()?;
 
@@ -972,13 +992,7 @@ fn parse_git_name_status_z(stdout: &[u8]) -> Vec<std::path::PathBuf> {
                     set.insert(String::from_utf8_lossy(new).to_string());
                 }
             }
-            // Added/modified: status, path
-            'A' | 'M' => {
-                if let Some(path) = it.next() {
-                    set.insert(String::from_utf8_lossy(path).to_string());
-                }
-            }
-            // Fallback: assume status + one path
+            // Added/modified/other: status, path
             _ => {
                 if let Some(path) = it.next() {
                     set.insert(String::from_utf8_lossy(path).to_string());
@@ -2807,6 +2821,182 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_cli_parse_test_with_explain_flag() {
+        let cli =
+            Cli::try_parse_from(["dcg", "test", "--explain", "git reset --hard"]).expect("parse");
+        if let Some(Command::TestCommand {
+            command,
+            explain,
+            format,
+            ..
+        }) = cli.command
+        {
+            assert_eq!(command, "git reset --hard");
+            assert!(explain);
+            assert_eq!(format, ExplainFormat::Pretty); // default format
+        } else {
+            panic!("Expected TestCommand");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_test_with_explain_and_format() {
+        let cli = Cli::try_parse_from([
+            "dcg",
+            "test",
+            "--explain",
+            "--format",
+            "compact",
+            "rm -rf /tmp",
+        ])
+        .expect("parse");
+        if let Some(Command::TestCommand {
+            command,
+            explain,
+            format,
+            ..
+        }) = cli.command
+        {
+            assert_eq!(command, "rm -rf /tmp");
+            assert!(explain);
+            assert_eq!(format, ExplainFormat::Compact);
+        } else {
+            panic!("Expected TestCommand");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_test_without_explain_flag() {
+        let cli = Cli::try_parse_from(["dcg", "test", "git status"]).expect("parse");
+        if let Some(Command::TestCommand {
+            command,
+            explain,
+            format,
+            ..
+        }) = cli.command
+        {
+            assert_eq!(command, "git status");
+            assert!(!explain);
+            assert_eq!(format, ExplainFormat::Pretty); // default
+        } else {
+            panic!("Expected TestCommand");
+        }
+    }
+
+    // ========================================================================
+    // Scan git integration tests
+    // ========================================================================
+
+    fn run_git(cwd: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .expect("run git");
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            panic!("git {args:?} failed: {stderr}");
+        }
+    }
+
+    fn init_fixture_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        run_git(dir.path(), &["init"]);
+        run_git(dir.path(), &["config", "user.email", "test@example.com"]);
+        run_git(dir.path(), &["config", "user.name", "Test User"]);
+
+        std::fs::write(dir.path().join("base.txt"), "base").expect("write base");
+        run_git(dir.path(), &["add", "base.txt"]);
+        run_git(dir.path(), &["commit", "-m", "init"]);
+
+        dir
+    }
+
+    #[test]
+    fn get_staged_files_errors_when_not_git_repo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = get_staged_files_at(dir.path()).expect_err("should error");
+        assert!(err.to_string().contains("Not a git repository"));
+    }
+
+    #[test]
+    fn get_staged_files_handles_spaces_and_newlines() {
+        let repo = init_fixture_repo();
+
+        std::fs::write(repo.path().join("hello world.rs"), "x").expect("write");
+        std::fs::write(repo.path().join("weird\nname.rs"), "y").expect("write");
+        run_git(repo.path(), &["add", "hello world.rs", "weird\nname.rs"]);
+
+        let paths = get_staged_files_at(repo.path()).expect("staged files");
+        let rendered: Vec<String> = paths
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+
+        assert!(rendered.contains(&"hello world.rs".to_string()));
+        assert!(rendered.contains(&"weird\nname.rs".to_string()));
+    }
+
+    #[test]
+    fn get_staged_files_rename_returns_new_path() {
+        let repo = init_fixture_repo();
+
+        std::fs::write(repo.path().join("old.rs"), "x").expect("write");
+        run_git(repo.path(), &["add", "old.rs"]);
+        run_git(repo.path(), &["commit", "-m", "add old"]);
+
+        run_git(repo.path(), &["mv", "old.rs", "new.rs"]);
+
+        let paths = get_staged_files_at(repo.path()).expect("staged files");
+        let rendered: Vec<String> = paths
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+
+        assert!(rendered.contains(&"new.rs".to_string()));
+        assert!(!rendered.contains(&"old.rs".to_string()));
+    }
+
+    #[test]
+    fn get_staged_files_delete_is_skipped() {
+        let repo = init_fixture_repo();
+
+        std::fs::write(repo.path().join("delete.rs"), "x").expect("write");
+        run_git(repo.path(), &["add", "delete.rs"]);
+        run_git(repo.path(), &["commit", "-m", "add delete"]);
+
+        run_git(repo.path(), &["rm", "delete.rs"]);
+
+        let paths = get_staged_files_at(repo.path()).expect("staged files");
+        let contains_deleted = paths
+            .iter()
+            .any(|p| p.to_string_lossy() == "delete.rs");
+
+        assert!(!contains_deleted);
+    }
+
+    #[test]
+    fn get_git_diff_files_returns_changed_paths() {
+        let repo = init_fixture_repo();
+
+        std::fs::write(repo.path().join("diff.rs"), "v1").expect("write");
+        run_git(repo.path(), &["add", "diff.rs"]);
+        run_git(repo.path(), &["commit", "-m", "add diff"]);
+
+        std::fs::write(repo.path().join("diff.rs"), "v2").expect("write");
+        run_git(repo.path(), &["add", "diff.rs"]);
+        run_git(repo.path(), &["commit", "-m", "mod diff"]);
+
+        let paths = get_git_diff_files_at(repo.path(), "HEAD~1..HEAD").expect("diff files");
+        let contains_diff = paths
+            .iter()
+            .any(|p| p.to_string_lossy() == "diff.rs");
+
+        assert!(contains_diff);
+    }
+
     // ========================================================================
     // Glob matching tests
     // ========================================================================
@@ -2831,5 +3021,23 @@ mod tests {
         assert!(glob_match("**/*.rs", "src/deep/nested/main.rs"));
         assert!(glob_match("src/**", "src/main.rs"));
         assert!(glob_match("src/**", "src/deep/nested/file.rs"));
+    }
+
+    #[test]
+    fn test_glob_match_overlapping_prefix_suffix() {
+        // Edge case: pattern where prefix+suffix > path length would cause panic
+        // without the min_len check in glob_match
+        assert!(!glob_match("test*st", "test")); // "test" ends with "st" but prefix+suffix=6 > 4
+        assert!(glob_match("test*st", "testst")); // exactly prefix+suffix=6, path=6, empty middle
+        assert!(glob_match("test*st", "test_xst")); // middle is "_x", valid match
+        assert!(glob_match("a*b", "ab")); // prefix+suffix=2, path=2, empty middle is OK
+        assert!(glob_match("a*b", "axb")); // middle is "x"
+        assert!(!glob_match("a*b", "b")); // doesn't start with "a"
+        // Key edge case: overlapping prefix/suffix where path.len() < prefix.len() + suffix.len()
+        // Pattern "ab*ab" has prefix="ab" (2) + suffix="ab" (2) = min_len 4
+        // Path "ab" has len 2 which is < 4, so cannot match (would panic without min_len check)
+        assert!(!glob_match("ab*ab", "ab")); // path too short
+        assert!(glob_match("ab*ab", "abab")); // exactly min_len, empty middle
+        assert!(glob_match("ab*ab", "abXab")); // middle is "X"
     }
 }
