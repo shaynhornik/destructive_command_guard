@@ -301,15 +301,20 @@ impl AstMatcher {
                 // Create preview (truncate if too long, UTF-8 safe)
                 let preview = truncate_preview(&matched_text, 60);
 
+                let Some(refined) = refine_match_meta(language, &compiled.meta, &matched_text)
+                else {
+                    continue;
+                };
+
                 matches.push(PatternMatch {
-                    rule_id: compiled.meta.rule_id.clone(),
-                    reason: compiled.meta.reason.clone(),
+                    rule_id: refined.rule_id,
+                    reason: refined.reason,
                     matched_text_preview: preview,
                     start: range.start,
                     end: range.end,
                     line_number,
-                    severity: compiled.meta.severity,
-                    suggestion: compiled.meta.suggestion.clone(),
+                    severity: refined.severity,
+                    suggestion: refined.suggestion,
                 });
             }
         }
@@ -356,6 +361,284 @@ const fn script_language_to_ast_lang(lang: ScriptLanguage) -> Option<SupportLang
 }
 
 // ============================================================================
+// Match refinement (payload / path analysis)
+// ============================================================================
+
+#[derive(Debug)]
+struct RefinedMatchMeta {
+    rule_id: String,
+    reason: String,
+    severity: Severity,
+    suggestion: Option<String>,
+}
+
+static JS_RECURSIVE_TRUE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)\brecursive\s*:\s*true\b").expect("js recursive:true regex compiles")
+});
+
+static JS_EXEC_SYNC_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
+    // Matches: execSync("...") / execSync('...')
+    Regex::new(r#"(?m)\bexecSync\b\s*\(\s*(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)')"#)
+        .expect("js execSync literal regex compiles")
+});
+
+static JS_SPAWN_SYNC_CMD_ARGS: LazyLock<Regex> = LazyLock::new(|| {
+    // Matches: spawnSync("cmd", [ ... ]) / spawnSync('cmd', [ ... ])
+    Regex::new(
+        r#"(?m)\bspawnSync\b\s*\(\s*(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)')\s*,\s*\[(?P<args>[^\]]*)\]"#,
+    )
+    .expect("js spawnSync(cmd, [args]) regex compiles")
+});
+
+static JS_ARRAY_STRING_LITERALS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?m)(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)')"#)
+        .expect("js array string literal regex compiles")
+});
+
+static JS_FIRST_STRING_ARG: LazyLock<Regex> = LazyLock::new(|| {
+    // Captures the first string literal argument in a call expression.
+    Regex::new(r#"(?m)\(\s*(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)')"#)
+        .expect("js first string arg regex compiles")
+});
+
+static RUBY_SYSTEM_EXEC_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
+    // Matches:
+    // - system("...") / system '...'
+    // - exec("...")   / exec '...'
+    // - Kernel.system("...") / Kernel.exec("...")
+    Regex::new(
+        r#"(?m)\b(?:(?:Kernel|Process)\.)?(?P<call>system|exec)\b(?:\s*\(\s*|\s+)(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)')"#,
+    )
+    .expect("ruby system/exec literal regex compiles")
+});
+
+static RUBY_BACKTICKS_LITERAL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)`(?P<cmd>[^`\n]*)`").expect("ruby backticks regex compiles"));
+
+static RUBY_FIRST_STRING_ARG: LazyLock<Regex> = LazyLock::new(|| {
+    // Captures first string literal argument in Ruby call forms:
+    // - foo("...") / foo('...')
+    // - foo "..."  / foo '...'
+    Regex::new(r#"(?m)(?:\(\s*|\s+)(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)')"#)
+        .expect("ruby first string arg regex compiles")
+});
+
+fn refine_match_meta(
+    language: ScriptLanguage,
+    meta: &CompiledPattern,
+    matched_text: &str,
+) -> Option<RefinedMatchMeta> {
+    match language {
+        ScriptLanguage::JavaScript => refine_javascript_match(meta, matched_text),
+        ScriptLanguage::Ruby => refine_ruby_match(meta, matched_text),
+        _ => Some(RefinedMatchMeta {
+            rule_id: meta.rule_id.clone(),
+            reason: meta.reason.clone(),
+            severity: meta.severity,
+            suggestion: meta.suggestion.clone(),
+        }),
+    }
+}
+
+fn refine_javascript_match(meta: &CompiledPattern, matched_text: &str) -> Option<RefinedMatchMeta> {
+    let rule_id = meta.rule_id.as_str();
+
+    if matches!(
+        rule_id,
+        "heredoc.javascript.execsync" | "heredoc.javascript.require_execsync"
+    ) {
+        let payload = JS_EXEC_SYNC_LITERAL
+            .captures(matched_text)
+            .and_then(|caps| string_literal_from_caps(&caps));
+
+        if let Some(payload) = payload {
+            return detect_shell_payload(payload).map(|hit| RefinedMatchMeta {
+                rule_id: format!("{rule_id}.{}", hit.rule_suffix),
+                reason: hit.reason.to_string(),
+                severity: hit.severity,
+                suggestion: hit.suggestion.map(str::to_string),
+            });
+        }
+
+        // Dynamic payloads: warn only (fail-open).
+        return Some(RefinedMatchMeta {
+            rule_id: meta.rule_id.clone(),
+            reason: meta.reason.clone(),
+            severity: meta.severity,
+            suggestion: meta.suggestion.clone(),
+        });
+    }
+
+    if rule_id == "heredoc.javascript.spawnsync" {
+        if let Some(caps) = JS_SPAWN_SYNC_CMD_ARGS.captures(matched_text) {
+            let cmd = string_literal_from_caps(&caps).unwrap_or("");
+            let args = caps.name("args").map_or("", |m| m.as_str());
+            let args: Vec<&str> = JS_ARRAY_STRING_LITERALS
+                .captures_iter(args)
+                .filter_map(|caps| string_literal_from_caps(&caps))
+                .collect();
+
+            if let Some(reconstructed) = reconstruct_spawn_command(cmd, &args) {
+                return detect_shell_payload(&reconstructed).map(|hit| RefinedMatchMeta {
+                    rule_id: format!("{rule_id}.{}", hit.rule_suffix),
+                    reason: hit.reason.to_string(),
+                    severity: hit.severity,
+                    suggestion: hit.suggestion.map(str::to_string),
+                });
+            }
+
+            return None;
+        }
+
+        // Dynamic spawnSync: warn only.
+        return Some(RefinedMatchMeta {
+            rule_id: meta.rule_id.clone(),
+            reason: meta.reason.clone(),
+            severity: Severity::Medium,
+            suggestion: meta.suggestion.clone(),
+        });
+    }
+
+    if rule_id.starts_with("heredoc.javascript.fs_")
+        || rule_id.starts_with("heredoc.javascript.fspromises_")
+    {
+        let path = JS_FIRST_STRING_ARG
+            .captures(matched_text)
+            .and_then(|caps| string_literal_from_caps(&caps));
+
+        let recursive_relevant = JS_RECURSIVE_TRUE.is_match(matched_text);
+        let catastrophic = path.is_some_and(is_catastrophic_path);
+
+        // For fs.rm* / fs.rmdir* we only care about recursive deletion (or catastrophic literal paths).
+        let needs_recursive = matches!(
+            rule_id,
+            "heredoc.javascript.fs_rmsync"
+                | "heredoc.javascript.fs_rmdirsync"
+                | "heredoc.javascript.fs_rm"
+                | "heredoc.javascript.fs_rmdir"
+                | "heredoc.javascript.fspromises_rm"
+                | "heredoc.javascript.fspromises_rmdir"
+        );
+
+        if needs_recursive && !recursive_relevant && !catastrophic {
+            return None;
+        }
+
+        if catastrophic {
+            return Some(RefinedMatchMeta {
+                rule_id: format!("{rule_id}.catastrophic"),
+                reason: format!("{} (catastrophic target path)", meta.reason),
+                severity: Severity::Critical,
+                suggestion: meta.suggestion.clone(),
+            });
+        }
+
+        return Some(RefinedMatchMeta {
+            rule_id: meta.rule_id.clone(),
+            reason: meta.reason.clone(),
+            severity: Severity::Medium,
+            suggestion: meta.suggestion.clone(),
+        });
+    }
+
+    Some(RefinedMatchMeta {
+        rule_id: meta.rule_id.clone(),
+        reason: meta.reason.clone(),
+        severity: meta.severity,
+        suggestion: meta.suggestion.clone(),
+    })
+}
+
+fn refine_ruby_match(meta: &CompiledPattern, matched_text: &str) -> Option<RefinedMatchMeta> {
+    let rule_id = meta.rule_id.as_str();
+
+    if matches!(
+        rule_id,
+        "heredoc.ruby.system"
+            | "heredoc.ruby.exec"
+            | "heredoc.ruby.kernel_system"
+            | "heredoc.ruby.kernel_exec"
+            | "heredoc.ruby.backticks"
+    ) {
+        let payload = if rule_id == "heredoc.ruby.backticks" {
+            RUBY_BACKTICKS_LITERAL
+                .captures(matched_text)
+                .and_then(|caps| caps.name("cmd").map(|m| m.as_str()))
+        } else {
+            RUBY_SYSTEM_EXEC_LITERAL
+                .captures(matched_text)
+                .and_then(|caps| string_literal_from_caps(&caps))
+        };
+
+        if let Some(payload) = payload {
+            return detect_shell_payload(payload).map(|hit| RefinedMatchMeta {
+                rule_id: format!("{rule_id}.{}", hit.rule_suffix),
+                reason: hit.reason.to_string(),
+                severity: hit.severity,
+                suggestion: hit.suggestion.map(str::to_string),
+            });
+        }
+
+        // Dynamic system/exec/backticks: warn only.
+        return Some(RefinedMatchMeta {
+            rule_id: meta.rule_id.clone(),
+            reason: meta.reason.clone(),
+            severity: Severity::Medium,
+            suggestion: meta.suggestion.clone(),
+        });
+    }
+
+    if rule_id.starts_with("heredoc.ruby.fileutils_")
+        || rule_id.starts_with("heredoc.ruby.file_")
+        || rule_id.starts_with("heredoc.ruby.dir_")
+    {
+        let path = RUBY_FIRST_STRING_ARG
+            .captures(matched_text)
+            .and_then(|caps| string_literal_from_caps(&caps));
+
+        let catastrophic = path.is_some_and(is_catastrophic_path);
+        if catastrophic {
+            return Some(RefinedMatchMeta {
+                rule_id: format!("{rule_id}.catastrophic"),
+                reason: format!("{} (catastrophic target path)", meta.reason),
+                severity: Severity::Critical,
+                suggestion: meta.suggestion.clone(),
+            });
+        }
+
+        return Some(RefinedMatchMeta {
+            rule_id: meta.rule_id.clone(),
+            reason: meta.reason.clone(),
+            severity: Severity::Medium,
+            suggestion: meta.suggestion.clone(),
+        });
+    }
+
+    Some(RefinedMatchMeta {
+        rule_id: meta.rule_id.clone(),
+        reason: meta.reason.clone(),
+        severity: meta.severity,
+        suggestion: meta.suggestion.clone(),
+    })
+}
+
+fn reconstruct_spawn_command(cmd: &str, args: &[&str]) -> Option<String> {
+    let cmd = cmd.trim();
+    if cmd.is_empty() {
+        return None;
+    }
+
+    let mut out = String::new();
+    out.push_str(cmd);
+    for arg in args {
+        out.push(' ');
+        out.push_str(arg);
+    }
+
+    Some(out)
+}
+
+// ============================================================================
 // Perl regex fallback matcher (git_safety_guard-2d4)
 // ============================================================================
 
@@ -394,15 +677,6 @@ static PERL_UNLINK_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
 static PERL_RMDIR_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?m)\brmdir\b(?:\s*\(\s*|\s+)(?:"(?P<dq>[^"\n]*)"|'(?P<sq>[^'\n]*)')"#)
         .expect("perl rmdir regex compiles")
-});
-
-static PERL_RM_RF_TARGET: LazyLock<Regex> = LazyLock::new(|| {
-    // Extracts a target token for common rm -rf flag orders.
-    // This is heuristic and intentionally does not attempt to fully parse shell.
-    Regex::new(
-        r"\brm\b\s+-[A-Za-z]*[rR][A-Za-z]*f[A-Za-z]*\s+(?P<t1>\S+)|\brm\b\s+-[A-Za-z]*f[A-Za-z]*[rR][A-Za-z]*\s+(?P<t2>\S+)",
-    )
-    .expect("rm -rf target regex compiles")
 });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -532,7 +806,7 @@ fn scan_perl_system_exec(
             _ => continue,
         };
 
-        let Some(payload) = perl_string_literal_from_caps(&caps) else {
+        let Some(payload) = string_literal_from_caps(&caps) else {
             continue;
         };
 
@@ -635,7 +909,7 @@ fn scan_perl_file_path(
         let Some(m) = caps.get(0) else {
             continue;
         };
-        let Some(path) = perl_string_literal_from_caps(&caps) else {
+        let Some(path) = string_literal_from_caps(&caps) else {
             continue;
         };
         let fn_name = caps.name("fn").map_or("rmtree", |m| m.as_str());
@@ -786,7 +1060,7 @@ fn mask_perl_comments(code: &str) -> std::borrow::Cow<'_, str> {
     String::from_utf8(out).map_or(std::borrow::Cow::Borrowed(code), std::borrow::Cow::Owned)
 }
 
-fn perl_string_literal_from_caps<'a>(caps: &'a regex::Captures<'a>) -> Option<&'a str> {
+fn string_literal_from_caps<'t>(caps: &regex::Captures<'t>) -> Option<&'t str> {
     caps.name("dq")
         .or_else(|| caps.name("sq"))
         .map(|m| m.as_str())
@@ -801,7 +1075,7 @@ fn push_perl_shell_payload_match(
     start: usize,
     end: usize,
 ) {
-    let Some(hit) = detect_perl_shell_payload(payload) else {
+    let Some(hit) = detect_shell_payload(payload) else {
         return;
     };
 
@@ -819,56 +1093,193 @@ fn push_perl_shell_payload_match(
     );
 }
 
-struct PerlShellHit {
+struct ShellPayloadHit {
     rule_suffix: &'static str,
     reason: &'static str,
     severity: Severity,
     suggestion: Option<&'static str>,
 }
 
-fn detect_perl_shell_payload(payload: &str) -> Option<PerlShellHit> {
-    let payload = payload.trim();
+fn detect_shell_payload(payload: &str) -> Option<ShellPayloadHit> {
+    for segment in payload.split(&[';', '\n', '|', '&'][..]) {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
 
-    if payload.contains("git reset --hard") {
-        return Some(PerlShellHit {
-            rule_suffix: "git_reset_hard",
-            reason: "git reset --hard destroys uncommitted changes",
-            severity: Severity::High,
-            suggestion: Some("Use 'git stash' first, or prefer safer alternatives"),
-        });
+        let mut tokens = segment.split_whitespace().peekable();
+        let Some(cmd) = next_shell_command(&mut tokens) else {
+            continue;
+        };
+
+        match cmd {
+            "git" => {
+                if let Some(hit) = detect_git_destructive(tokens) {
+                    return Some(hit);
+                }
+            }
+            "rm" => {
+                if let Some(hit) = detect_rm_rf_destructive(tokens) {
+                    return Some(hit);
+                }
+            }
+            _ => {}
+        }
     }
 
-    if payload.contains("git clean -fd") || payload.contains("git clean -df") {
-        return Some(PerlShellHit {
-            rule_suffix: "git_clean_fd",
-            reason: "git clean -fd permanently deletes untracked files",
-            severity: Severity::High,
-            suggestion: Some("Use 'git clean -n' first to preview deletions"),
-        });
+    None
+}
+
+fn detect_git_destructive<'a, I>(mut tokens: I) -> Option<ShellPayloadHit>
+where
+    I: Iterator<Item = &'a str>,
+{
+    let sub = tokens.next()?;
+
+    if sub == "reset" {
+        if tokens.any(|t| t == "--hard") {
+            return Some(ShellPayloadHit {
+                rule_suffix: "git_reset_hard",
+                reason: "git reset --hard destroys uncommitted changes",
+                severity: Severity::High,
+                suggestion: Some("Use 'git stash' first, or prefer safer alternatives"),
+            });
+        }
+        return None;
     }
 
-    let target = first_rm_rf_target(payload)?;
+    if sub == "clean" {
+        let mut has_f = false;
+        let mut has_d = false;
 
-    let catastrophic = is_catastrophic_path(clean_path_token(target));
-    let severity = if catastrophic {
-        Severity::Critical
-    } else {
-        Severity::Medium
-    };
+        for t in tokens {
+            if t == "--force" {
+                has_f = true;
+                continue;
+            }
+            if t == "--dry-run" || t == "-n" {
+                continue;
+            }
+            if t.starts_with('-') {
+                let flags = t.trim_start_matches('-');
+                has_f |= flags.contains('f');
+                has_d |= flags.contains('d');
+            }
+        }
 
-    Some(PerlShellHit {
-        rule_suffix: "rm_rf",
-        reason: "rm -rf recursively deletes files/directories",
-        severity,
+        if has_f && has_d {
+            return Some(ShellPayloadHit {
+                rule_suffix: "git_clean_fd",
+                reason: "git clean -fd permanently deletes untracked files",
+                severity: Severity::High,
+                suggestion: Some("Use 'git clean -n' first to preview deletions"),
+            });
+        }
+    }
+
+    None
+}
+
+fn detect_rm_rf_destructive<'a, I>(tokens: I) -> Option<ShellPayloadHit>
+where
+    I: Iterator<Item = &'a str>,
+{
+    let mut has_r = false;
+    let mut has_f = false;
+    let mut target: Option<&str> = None;
+    let mut options_ended = false;
+
+    for token in tokens {
+        if !options_ended && token == "--" {
+            options_ended = true;
+            continue;
+        }
+        if !options_ended && token.starts_with('-') {
+            if token == "--recursive" {
+                has_r = true;
+                continue;
+            }
+            if token == "--force" {
+                has_f = true;
+                continue;
+            }
+
+            let flags = token.trim_start_matches('-');
+            has_r |= flags.chars().any(|c| matches!(c, 'r' | 'R'));
+            has_f |= flags.contains('f');
+            continue;
+        }
+
+        target = Some(token);
+        break;
+    }
+
+    if !has_r || !has_f {
+        return None;
+    }
+
+    let target = clean_path_token(target?);
+    let catastrophic = is_catastrophic_path(target);
+
+    Some(ShellPayloadHit {
+        rule_suffix: if catastrophic {
+            "rm_rf_catastrophic"
+        } else {
+            "rm_rf"
+        },
+        reason: if catastrophic {
+            "rm -rf recursively deletes files/directories (catastrophic target path)"
+        } else {
+            "rm -rf recursively deletes files/directories"
+        },
+        severity: if catastrophic {
+            Severity::Critical
+        } else {
+            Severity::Medium
+        },
         suggestion: Some("Verify the target path and use safer alternatives when possible"),
     })
 }
 
-fn first_rm_rf_target(cmd: &str) -> Option<&str> {
-    let caps = PERL_RM_RF_TARGET.captures(cmd)?;
-    caps.name("t1")
-        .or_else(|| caps.name("t2"))
-        .map(|m| m.as_str())
+fn next_shell_command<'a, I>(tokens: &mut std::iter::Peekable<I>) -> Option<&'a str>
+where
+    I: Iterator<Item = &'a str>,
+{
+    loop {
+        let token = tokens.next()?;
+        match token {
+            "sudo" => {
+                while let Some(&next) = tokens.peek() {
+                    if !next.starts_with('-') {
+                        break;
+                    }
+                    let flag = tokens.next().unwrap_or_default();
+                    if matches!(flag, "-u" | "-g" | "-h") {
+                        let _ = tokens.next();
+                    }
+                }
+            }
+            "command" => {
+                while let Some(&next) = tokens.peek() {
+                    if next.starts_with('-') {
+                        let _ = tokens.next();
+                        continue;
+                    }
+                    break;
+                }
+            }
+            "env" => {
+                while let Some(&next) = tokens.peek() {
+                    if next.starts_with('-') || next.contains('=') {
+                        let _ = tokens.next();
+                        continue;
+                    }
+                    break;
+                }
+            }
+            _ => return Some(token),
+        }
+    }
 }
 
 fn clean_path_token(token: &str) -> &str {
@@ -1038,36 +1449,36 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
                 "fs.rmSync($$$)".to_string(),
                 "heredoc.javascript.fs_rmsync".to_string(),
                 "fs.rmSync() deletes files/directories".to_string(),
-                Severity::Critical,
-                None,
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
             ),
             CompiledPattern::new(
                 "fs.rmdirSync($$$)".to_string(),
                 "heredoc.javascript.fs_rmdirsync".to_string(),
                 "fs.rmdirSync() deletes directories".to_string(),
-                Severity::High,
-                None,
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
             ),
             CompiledPattern::new(
                 "fs.unlinkSync($$$)".to_string(),
                 "heredoc.javascript.fs_unlinksync".to_string(),
                 "fs.unlinkSync() deletes files".to_string(),
-                Severity::High,
+                Severity::Low,
                 None,
             ),
             CompiledPattern::new(
                 "child_process.execSync($$$)".to_string(),
                 "heredoc.javascript.execsync".to_string(),
                 "execSync() executes shell commands".to_string(),
-                Severity::High,
+                Severity::Medium, // refined to block only on destructive literal payloads
                 Some("Validate command arguments carefully".to_string()),
             ),
             CompiledPattern::new(
                 "require('child_process').execSync($$$)".to_string(),
                 "heredoc.javascript.require_execsync".to_string(),
                 "execSync() executes shell commands".to_string(),
-                Severity::High,
-                None,
+                Severity::Medium, // refined to block only on destructive literal payloads
+                Some("Validate command arguments carefully".to_string()),
             ),
             // Spawn variants
             CompiledPattern::new(
@@ -1082,21 +1493,21 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
                 "fs.rm($$$)".to_string(),
                 "heredoc.javascript.fs_rm".to_string(),
                 "fs.rm() deletes files/directories".to_string(),
-                Severity::High,
-                None,
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
             ),
             CompiledPattern::new(
                 "fs.rmdir($$$)".to_string(),
                 "heredoc.javascript.fs_rmdir".to_string(),
                 "fs.rmdir() deletes directories".to_string(),
-                Severity::High,
-                None,
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
             ),
             CompiledPattern::new(
                 "fs.unlink($$$)".to_string(),
                 "heredoc.javascript.fs_unlink".to_string(),
                 "fs.unlink() deletes files".to_string(),
-                Severity::High,
+                Severity::Low,
                 None,
             ),
             // Promise-based fs variants
@@ -1104,15 +1515,15 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
                 "fsPromises.rm($$$)".to_string(),
                 "heredoc.javascript.fspromises_rm".to_string(),
                 "fsPromises.rm() deletes files/directories".to_string(),
-                Severity::High,
-                None,
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
             ),
             CompiledPattern::new(
                 "fsPromises.rmdir($$$)".to_string(),
                 "heredoc.javascript.fspromises_rmdir".to_string(),
                 "fsPromises.rmdir() deletes directories".to_string(),
-                Severity::High,
-                None,
+                Severity::Medium, // warn-only unless catastrophic literal target (refined at match time)
+                Some("Verify target path carefully before running".to_string()),
             ),
         ],
     );
@@ -1156,56 +1567,56 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
                 "FileUtils.rm_rf($$$)".to_string(),
                 "heredoc.ruby.fileutils_rm_rf".to_string(),
                 "FileUtils.rm_rf() recursively deletes directories".to_string(),
-                Severity::Critical,
+                Severity::Medium, // refined to block only on catastrophic literal target
                 Some("Verify target path carefully before running".to_string()),
             ),
             CompiledPattern::new(
                 "FileUtils.remove_dir($$$)".to_string(),
                 "heredoc.ruby.fileutils_remove_dir".to_string(),
                 "FileUtils.remove_dir() deletes directories".to_string(),
-                Severity::High,
+                Severity::Medium, // refined to block only on catastrophic literal target
                 None,
             ),
             CompiledPattern::new(
                 "FileUtils.rm($$$)".to_string(),
                 "heredoc.ruby.fileutils_rm".to_string(),
                 "FileUtils.rm() deletes files".to_string(),
-                Severity::High,
+                Severity::Medium, // refined to block only on catastrophic literal target
                 None,
             ),
             CompiledPattern::new(
                 "FileUtils.remove($$$)".to_string(),
                 "heredoc.ruby.fileutils_remove".to_string(),
                 "FileUtils.remove() deletes files".to_string(),
-                Severity::High,
+                Severity::Medium, // refined to block only on catastrophic literal target
                 None,
             ),
             CompiledPattern::new(
                 "File.delete($$$)".to_string(),
                 "heredoc.ruby.file_delete".to_string(),
                 "File.delete() removes files".to_string(),
-                Severity::High,
+                Severity::Medium, // refined to block only on catastrophic literal target
                 None,
             ),
             CompiledPattern::new(
                 "File.unlink($$$)".to_string(),
                 "heredoc.ruby.file_unlink".to_string(),
                 "File.unlink() removes files".to_string(),
-                Severity::High,
+                Severity::Medium, // refined to block only on catastrophic literal target
                 None,
             ),
             CompiledPattern::new(
                 "Dir.rmdir($$$)".to_string(),
                 "heredoc.ruby.dir_rmdir".to_string(),
                 "Dir.rmdir() removes directories".to_string(),
-                Severity::High,
+                Severity::Medium, // refined to block only on catastrophic literal target
                 None,
             ),
             CompiledPattern::new(
                 "Dir.delete($$$)".to_string(),
                 "heredoc.ruby.dir_delete".to_string(),
                 "Dir.delete() removes directories".to_string(),
-                Severity::High,
+                Severity::Medium, // refined to block only on catastrophic literal target
                 None,
             ),
             // =========================================================================
@@ -1222,6 +1633,13 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
                 "exec($$$)".to_string(),
                 "heredoc.ruby.exec".to_string(),
                 "exec() replaces process with shell command".to_string(),
+                Severity::Medium,
+                Some("Validate command arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "`$$$`".to_string(),
+                "heredoc.ruby.backticks".to_string(),
+                "Backticks execute shell commands".to_string(),
                 Severity::Medium,
                 Some("Validate command arguments carefully".to_string()),
             ),
@@ -1415,30 +1833,161 @@ mod tests {
         }
     }
 
-    #[test]
-    fn javascript_positive_match() {
-        let matcher = AstMatcher::new();
-        let code = "const fs = require('fs');\nfs.rmSync('/tmp/test', {recursive: true});";
+    mod javascript_positive_fixtures {
+        use super::*;
 
-        let matches = matcher.find_matches(code, ScriptLanguage::JavaScript);
-        match matches {
-            Ok(m) => {
-                assert!(!m.is_empty(), "should match fs.rmSync");
-                assert!(m[0].rule_id.contains("rmsync"));
-            }
-            Err(e) => panic!("unexpected error: {e}"),
+        #[test]
+        fn fs_rmsync_catastrophic_blocks() {
+            let matcher = AstMatcher::new();
+            let code = "const fs = require('fs');\nfs.rmSync('/etc', { recursive: true });";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::JavaScript)
+                .unwrap();
+            assert!(
+                matches
+                    .iter()
+                    .any(|m| m.rule_id == "heredoc.javascript.fs_rmsync.catastrophic"),
+                "catastrophic fs.rmSync should be detected"
+            );
+            let hit = matches
+                .into_iter()
+                .find(|m| m.rule_id == "heredoc.javascript.fs_rmsync.catastrophic")
+                .unwrap();
+            assert!(hit.severity.blocks_by_default());
+        }
+
+        #[test]
+        fn fs_rmsync_non_catastrophic_warns_only() {
+            let matcher = AstMatcher::new();
+            let code = "const fs = require('fs');\nfs.rmSync('./dist', { recursive: true });";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::JavaScript)
+                .unwrap();
+            assert!(
+                matches
+                    .iter()
+                    .any(|m| m.rule_id == "heredoc.javascript.fs_rmsync"),
+                "non-catastrophic recursive rmSync should be detected"
+            );
+            let hit = matches
+                .into_iter()
+                .find(|m| m.rule_id == "heredoc.javascript.fs_rmsync")
+                .unwrap();
+            assert!(!hit.severity.blocks_by_default());
+        }
+
+        #[test]
+        fn execsync_git_reset_hard_blocks() {
+            let matcher = AstMatcher::new();
+            let code = "const child_process = require('child_process');\nchild_process.execSync('git reset --hard');";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::JavaScript)
+                .unwrap();
+            assert!(
+                matches
+                    .iter()
+                    .any(|m| m.rule_id.ends_with(".git_reset_hard")
+                        && m.severity.blocks_by_default()),
+                "execSync('git reset --hard') should block"
+            );
+        }
+
+        #[test]
+        fn execsync_rm_rf_non_catastrophic_warns_only() {
+            let matcher = AstMatcher::new();
+            let code = "const child_process = require('child_process');\nchild_process.execSync('rm -rf ./build');";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::JavaScript)
+                .unwrap();
+            assert!(
+                matches.iter().any(|m| m.rule_id.ends_with(".rm_rf")),
+                "execSync('rm -rf ./build') should be detected"
+            );
+            let hit = matches
+                .into_iter()
+                .find(|m| m.rule_id.ends_with(".rm_rf"))
+                .unwrap();
+            assert!(!hit.severity.blocks_by_default());
+        }
+
+        #[test]
+        fn spawnsync_rm_rf_catastrophic_blocks() {
+            let matcher = AstMatcher::new();
+            let code = "const child_process = require('child_process');\nchild_process.spawnSync('rm', ['-rf', '/']);";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::JavaScript)
+                .unwrap();
+            assert!(
+                matches
+                    .iter()
+                    .any(|m| m.rule_id.ends_with(".rm_rf_catastrophic")
+                        && m.severity.blocks_by_default()),
+                "spawnSync('rm', ['-rf','/']) should block"
+            );
         }
     }
 
-    #[test]
-    fn javascript_negative_match() {
-        let matcher = AstMatcher::new();
-        let code = "console.log('hello');";
+    mod javascript_negative_fixtures {
+        use super::*;
 
-        let matches = matcher.find_matches(code, ScriptLanguage::JavaScript);
-        match matches {
-            Ok(m) => assert!(m.is_empty(), "should not match safe code"),
-            Err(e) => panic!("unexpected error: {e}"),
+        #[test]
+        fn printed_dangerous_string_does_not_match() {
+            let matcher = AstMatcher::new();
+            let code = "console.log('rm -rf /');";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::JavaScript)
+                .unwrap();
+            assert!(matches.is_empty());
+        }
+
+        #[test]
+        fn require_child_process_alone_does_not_match() {
+            let matcher = AstMatcher::new();
+            let code = "require('child_process');";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::JavaScript)
+                .unwrap();
+            assert!(matches.is_empty());
+        }
+
+        #[test]
+        fn execsync_safe_payload_does_not_match() {
+            let matcher = AstMatcher::new();
+            let code = "const child_process = require('child_process');\nchild_process.execSync('git status');";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::JavaScript)
+                .unwrap();
+            assert!(matches.is_empty());
+        }
+
+        #[test]
+        fn fs_rmsync_without_recursive_does_not_match() {
+            let matcher = AstMatcher::new();
+            let code = "const fs = require('fs');\nfs.rmSync('./file.txt');";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::JavaScript)
+                .unwrap();
+            assert!(matches.is_empty());
+        }
+
+        #[test]
+        fn spawnsync_echo_does_not_match() {
+            let matcher = AstMatcher::new();
+            let code = "const child_process = require('child_process');\nchild_process.spawnSync('echo', ['rm -rf /']);";
+
+            let matches = matcher
+                .find_matches(code, ScriptLanguage::JavaScript)
+                .unwrap();
+            assert!(matches.is_empty());
         }
     }
 
@@ -1675,31 +2224,137 @@ mod tests {
         assert_eq!(truncate_preview("abcd", 3), "...");
     }
 
-    #[test]
-    fn ruby_positive_match() {
-        let matcher = AstMatcher::new();
-        let code = "require 'fileutils'\nFileUtils.rm_rf('/tmp/danger')";
+    mod ruby_positive_fixtures {
+        use super::*;
 
-        let matches = matcher.find_matches(code, ScriptLanguage::Ruby);
-        match matches {
-            Ok(m) => {
-                assert!(!m.is_empty(), "should match FileUtils.rm_rf");
-                assert!(m[0].rule_id.contains("ruby"));
-                assert!(m[0].severity.blocks_by_default());
-            }
-            Err(e) => panic!("unexpected error: {e}"),
+        #[test]
+        fn fileutils_rm_rf_catastrophic_blocks() {
+            let matcher = AstMatcher::new();
+            let code = "require 'fileutils'\nFileUtils.rm_rf('/')";
+
+            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            assert!(
+                matches
+                    .iter()
+                    .any(|m| m.rule_id == "heredoc.ruby.fileutils_rm_rf.catastrophic"
+                        && m.severity.blocks_by_default()),
+                "catastrophic FileUtils.rm_rf should block"
+            );
+        }
+
+        #[test]
+        fn fileutils_rm_rf_non_catastrophic_warns_only() {
+            let matcher = AstMatcher::new();
+            let code = "require 'fileutils'\nFileUtils.rm_rf('./tmp')";
+
+            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            assert!(
+                matches
+                    .iter()
+                    .any(|m| m.rule_id == "heredoc.ruby.fileutils_rm_rf"
+                        && !m.severity.blocks_by_default()),
+                "non-catastrophic FileUtils.rm_rf should warn only"
+            );
+        }
+
+        #[test]
+        fn system_rm_rf_catastrophic_blocks() {
+            let matcher = AstMatcher::new();
+            let code = "system('rm -rf /')";
+
+            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            assert!(
+                matches
+                    .iter()
+                    .any(|m| m.rule_id.ends_with(".rm_rf_catastrophic")
+                        && m.severity.blocks_by_default()),
+                "system('rm -rf /') should block"
+            );
+        }
+
+        #[test]
+        fn backticks_rm_rf_catastrophic_blocks() {
+            let matcher = AstMatcher::new();
+            let code = "`rm -rf /`";
+
+            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            assert!(
+                matches
+                    .iter()
+                    .any(|m| m.rule_id.ends_with(".rm_rf_catastrophic")
+                        && m.severity.blocks_by_default()),
+                "backticks `rm -rf /` should block"
+            );
+        }
+
+        #[test]
+        fn exec_git_reset_hard_blocks() {
+            let matcher = AstMatcher::new();
+            let code = "exec('git reset --hard HEAD~1')";
+
+            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            assert!(
+                matches
+                    .iter()
+                    .any(|m| m.rule_id.ends_with(".git_reset_hard")
+                        && m.severity.blocks_by_default()),
+                "exec('git reset --hard ...') should block"
+            );
         }
     }
 
-    #[test]
-    fn ruby_negative_match() {
-        let matcher = AstMatcher::new();
-        let code = "puts 'hello world'";
+    mod ruby_negative_fixtures {
+        use super::*;
 
-        let matches = matcher.find_matches(code, ScriptLanguage::Ruby);
-        match matches {
-            Ok(m) => assert!(m.is_empty(), "should not match safe code"),
-            Err(e) => panic!("unexpected error: {e}"),
+        #[test]
+        fn puts_dangerous_string_does_not_match() {
+            let matcher = AstMatcher::new();
+            let code = "puts 'rm -rf /'";
+
+            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            assert!(matches.is_empty());
+        }
+
+        #[test]
+        fn system_safe_payload_does_not_match() {
+            let matcher = AstMatcher::new();
+            let code = "system('git status')";
+
+            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            assert!(matches.is_empty());
+        }
+
+        #[test]
+        fn backticks_safe_payload_does_not_match() {
+            let matcher = AstMatcher::new();
+            let code = "`echo hello`";
+
+            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            assert!(matches.is_empty());
+        }
+
+        #[test]
+        fn require_only_does_not_match() {
+            let matcher = AstMatcher::new();
+            let code = "require 'fileutils'";
+
+            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            assert!(matches.is_empty());
+        }
+
+        #[test]
+        fn file_delete_under_tmp_warns_only() {
+            let matcher = AstMatcher::new();
+            let code = "File.delete('/tmp/test.txt')";
+
+            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            assert!(
+                matches
+                    .iter()
+                    .any(|m| m.rule_id == "heredoc.ruby.file_delete"
+                        && !m.severity.blocks_by_default()),
+                "File.delete under /tmp should warn only"
+            );
         }
     }
 
