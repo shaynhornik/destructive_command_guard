@@ -349,10 +349,10 @@ pub fn evaluate_command_with_pack_order(
         return EvaluationResult::allowed();
     }
 
-    // False-positive immunity: strip known-safe string arguments (commit messages, search patterns,
-    // issue descriptions, etc.) so dangerous substrings inside data do not trigger blocking.
-    //
-    // If the sanitizer actually removes anything, re-run the keyword gate on the sanitized view.
+    // Step 5: False-positive immunity - strip known-safe string arguments (commit messages, search
+    // patterns, issue descriptions, etc.) so dangerous substrings inside data do not trigger
+    // blocking. If the sanitizer actually removes anything, re-run the keyword gate on the
+    // sanitized view.
     let sanitized = precomputed_sanitized.unwrap_or_else(|| sanitize_for_pattern_matching(command));
     let command_for_match = sanitized.as_ref();
     if matches!(sanitized, std::borrow::Cow::Owned(_))
@@ -364,10 +364,10 @@ pub fn evaluate_command_with_pack_order(
         return EvaluationResult::allowed();
     }
 
-    // Step 5: Normalize command (strip /usr/bin/git -> git, etc.)
+    // Step 6: Normalize command (strip /usr/bin/git -> git, etc.)
     let normalized = normalize_command(command_for_match);
 
-    // Step 6: Check enabled packs with allowlist override semantics.
+    // Step 7: Check enabled packs with allowlist override semantics.
     //
     // IMPORTANT: allowlisting must bypass only the specific matched rule, and must not
     // "disable other packs" by stopping evaluation early. If a command matches multiple
@@ -531,8 +531,9 @@ where
         return EvaluationResult::allowed();
     }
 
-    // False-positive immunity: strip known-safe string arguments (commit messages, search patterns,
-    // issue descriptions, etc.) so dangerous substrings inside data do not trigger blocking.
+    // Step 5: False-positive immunity - strip known-safe string arguments (commit messages, search
+    // patterns, issue descriptions, etc.) so dangerous substrings inside data do not trigger
+    // blocking.
     let sanitized = precomputed_sanitized.unwrap_or_else(|| sanitize_for_pattern_matching(command));
     let command_for_match = sanitized.as_ref();
     if matches!(sanitized, std::borrow::Cow::Owned(_))
@@ -544,24 +545,24 @@ where
         return EvaluationResult::allowed();
     }
 
-    // Step 5: Normalize command (strip /usr/bin/git -> git, etc.)
+    // Step 6: Normalize command (strip /usr/bin/git -> git, etc.)
     let normalized = normalize_command(command_for_match);
 
-    // Step 5: Check legacy safe patterns (whitelist)
+    // Step 7: Check legacy safe patterns (whitelist)
     for pattern in safe_patterns {
         if pattern.is_match(&normalized) {
             return EvaluationResult::allowed();
         }
     }
 
-    // Step 6: Check legacy destructive patterns (blacklist)
+    // Step 8: Check legacy destructive patterns (blacklist)
     for pattern in destructive_patterns {
         if pattern.is_match(&normalized) {
             return EvaluationResult::denied_by_legacy(pattern.reason());
         }
     }
 
-    // Step 7: Check enabled packs with allowlist override semantics.
+    // Step 9: Check enabled packs with allowlist override semantics.
     let enabled_packs: HashSet<String> = config.enabled_pack_ids();
     let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
     let result = evaluate_packs_with_allowlists(&normalized, &ordered_packs, allowlists);
