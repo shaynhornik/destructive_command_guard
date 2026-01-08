@@ -482,12 +482,19 @@ static PATH_NORMALIZER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^/(?:\S*/)*s?bin/(rm|git)(?=\s|$)").unwrap());
 
 /// Normalize a command by stripping absolute paths from common binaries.
+///
+/// Returns the original command unchanged if normalization fails (fail-open).
 #[inline]
 pub fn normalize_command(cmd: &str) -> Cow<'_, str> {
     if !cmd.starts_with('/') {
         return Cow::Borrowed(cmd);
     }
-    PATH_NORMALIZER.replace(cmd, "$1")
+    // Use try_replacen to handle regex errors gracefully (e.g., backtrack limit exceeded)
+    // On error, return the original command unchanged (fail-open for safety)
+    // Limit 1: only replace the first match (path prefix)
+    PATH_NORMALIZER
+        .try_replacen(cmd, 1, "$1")
+        .unwrap_or_else(|_| Cow::Borrowed(cmd))
 }
 
 /// Pre-compiled finders for core quick rejection (git/rm).
@@ -788,5 +795,32 @@ mod tests {
         let m = matched.unwrap();
         assert!(!m.reason.is_empty(), "reason should not be empty");
         // name may or may not be set depending on pack definition
+    }
+
+    /// Regression test for git_safety_guard-hcj: regex backtracking panic.
+    ///
+    /// Pathological inputs with many consecutive `/` characters can cause
+    /// fancy-regex to exceed its backtrack limit. This should fail-open
+    /// (return the original command) rather than panic.
+    #[test]
+    fn normalize_command_handles_pathological_input() {
+        // This input was discovered by fuzzing and caused a panic
+        let pathological = "//////////////////_(rm";
+        let result = normalize_command(pathological);
+
+        // Should not panic, and should return the original command unchanged
+        // (since it doesn't match the expected /path/to/bin/rm pattern)
+        assert_eq!(result.as_ref(), pathological);
+
+        // Additional pathological inputs
+        let long_slashes = "/".repeat(1000) + "rm";
+        let result2 = normalize_command(&long_slashes);
+        // Should not panic - exact output doesn't matter, just that it doesn't crash
+        assert!(!result2.is_empty());
+
+        // Input with null bytes (also discovered by fuzzing)
+        let with_nulls = "///\0\0/\0\0/\0\0//\0\0/\0[";
+        let result3 = normalize_command(with_nulls);
+        assert_eq!(result3.as_ref(), with_nulls);
     }
 }
