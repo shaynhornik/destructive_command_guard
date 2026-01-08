@@ -37,7 +37,6 @@
 
 use crate::config::Config;
 use crate::packs::{REGISTRY, normalize_command, pack_aware_quick_reject};
-use fancy_regex::Regex;
 use std::collections::HashSet;
 
 /// The decision made by the evaluator.
@@ -182,7 +181,7 @@ impl EvaluationResult {
     }
 }
 
-/// Evaluate a command against all patterns and packs.
+/// Evaluate a command against all patterns and packs using precompiled overrides.
 ///
 /// This is the main entry point for command evaluation. It performs all checks
 /// in the correct order and returns a structured result.
@@ -190,8 +189,9 @@ impl EvaluationResult {
 /// # Arguments
 ///
 /// * `command` - The raw command string to evaluate
-/// * `config` - Loaded configuration with overrides and pack settings
+/// * `config` - Loaded configuration with pack settings
 /// * `enabled_keywords` - Keywords from enabled packs for quick rejection
+/// * `compiled_overrides` - Precompiled config overrides (avoids per-command regex compilation)
 ///
 /// # Returns
 ///
@@ -202,36 +202,27 @@ impl EvaluationResult {
 ///
 /// This function is optimized for the common case (allow):
 /// - Quick rejection skips regex for 99%+ of commands
-/// - Config overrides are checked before expensive pattern matching
+/// - Config overrides use precompiled regexes (no per-command compilation)
 /// - Short-circuits on first match
 pub fn evaluate_command(
     command: &str,
     config: &Config,
     enabled_keywords: &[&str],
+    compiled_overrides: &crate::config::CompiledOverrides,
 ) -> EvaluationResult {
     // Empty commands are allowed (no-op)
     if command.is_empty() {
         return EvaluationResult::allowed();
     }
 
-    // Step 1: Check explicit allow overrides first
-    for allow in &config.overrides.allow {
-        if allow.condition_met() {
-            if let Ok(re) = Regex::new(allow.pattern()) {
-                if re.is_match(command).unwrap_or(false) {
-                    return EvaluationResult::allowed();
-                }
-            }
-        }
+    // Step 1: Check precompiled allow overrides first
+    if compiled_overrides.check_allow(command) {
+        return EvaluationResult::allowed();
     }
 
-    // Step 2: Check explicit block overrides
-    for block in &config.overrides.block {
-        if let Ok(re) = Regex::new(&block.pattern) {
-            if re.is_match(command).unwrap_or(false) {
-                return EvaluationResult::denied_by_config(block.reason.clone());
-            }
-        }
+    // Step 2: Check precompiled block overrides
+    if let Some(reason) = compiled_overrides.check_block(command) {
+        return EvaluationResult::denied_by_config(reason.to_string());
     }
 
     // Step 3: Quick rejection - if no relevant keywords, allow immediately
@@ -262,7 +253,7 @@ pub fn evaluate_command(
     EvaluationResult::allowed()
 }
 
-/// Evaluate a command with legacy pattern support.
+/// Evaluate a command with legacy pattern support using precompiled overrides.
 ///
 /// This version includes legacy `SAFE_PATTERNS` and `DESTRUCTIVE_PATTERNS` checking.
 /// It's intended to be used by the main hook entrypoint until the legacy patterns
@@ -271,8 +262,9 @@ pub fn evaluate_command(
 /// # Arguments
 ///
 /// * `command` - The raw command string to evaluate
-/// * `config` - Loaded configuration with overrides and pack settings
+/// * `config` - Loaded configuration with pack settings
 /// * `enabled_keywords` - Keywords from enabled packs for quick rejection
+/// * `compiled_overrides` - Precompiled config overrides (avoids per-command regex compilation)
 /// * `safe_patterns` - Legacy safe patterns (whitelist)
 /// * `destructive_patterns` - Legacy destructive patterns (blacklist)
 ///
@@ -285,6 +277,7 @@ pub fn evaluate_command_with_legacy<S, D>(
     command: &str,
     config: &Config,
     enabled_keywords: &[&str],
+    compiled_overrides: &crate::config::CompiledOverrides,
     safe_patterns: &[S],
     destructive_patterns: &[D],
 ) -> EvaluationResult
@@ -297,24 +290,14 @@ where
         return EvaluationResult::allowed();
     }
 
-    // Step 1: Check explicit allow overrides first
-    for allow in &config.overrides.allow {
-        if allow.condition_met() {
-            if let Ok(re) = Regex::new(allow.pattern()) {
-                if re.is_match(command).unwrap_or(false) {
-                    return EvaluationResult::allowed();
-                }
-            }
-        }
+    // Step 1: Check precompiled allow overrides first
+    if compiled_overrides.check_allow(command) {
+        return EvaluationResult::allowed();
     }
 
-    // Step 2: Check explicit block overrides
-    for block in &config.overrides.block {
-        if let Ok(re) = Regex::new(&block.pattern) {
-            if re.is_match(command).unwrap_or(false) {
-                return EvaluationResult::denied_by_config(block.reason.clone());
-            }
-        }
+    // Step 2: Check precompiled block overrides
+    if let Some(reason) = compiled_overrides.check_block(command) {
+        return EvaluationResult::denied_by_config(reason.to_string());
     }
 
     // Step 3: Quick rejection - if no relevant keywords, allow immediately
@@ -370,15 +353,21 @@ pub trait LegacyDestructivePattern {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fancy_regex::Regex;
 
     fn default_config() -> Config {
         Config::default()
     }
 
+    fn default_compiled_overrides() -> crate::config::CompiledOverrides {
+        crate::config::CompiledOverrides::default()
+    }
+
     #[test]
     fn test_empty_command_allowed() {
         let config = default_config();
-        let result = evaluate_command("", &config, &[]);
+        let compiled = default_compiled_overrides();
+        let result = evaluate_command("", &config, &[], &compiled);
         assert!(result.is_allowed());
         assert!(result.pattern_info.is_none());
     }
@@ -386,7 +375,8 @@ mod tests {
     #[test]
     fn test_safe_command_allowed() {
         let config = default_config();
-        let result = evaluate_command("ls -la", &config, &["git", "rm"]);
+        let compiled = default_compiled_overrides();
+        let result = evaluate_command("ls -la", &config, &["git", "rm"], &compiled);
         assert!(result.is_allowed());
     }
 
@@ -443,12 +433,13 @@ mod tests {
     #[test]
     fn test_quick_reject_skips_patterns() {
         let config = default_config();
+        let compiled = default_compiled_overrides();
         // Command with no relevant keywords should be quickly allowed
-        let result = evaluate_command("cargo build --release", &config, &["git", "rm"]);
+        let result = evaluate_command("cargo build --release", &config, &["git", "rm"], &compiled);
         assert!(result.is_allowed());
 
         // Even with more keywords
-        let result = evaluate_command("npm install", &config, &["git", "rm", "docker", "kubectl"]);
+        let result = evaluate_command("npm install", &config, &["git", "rm", "docker", "kubectl"], &compiled);
         assert!(result.is_allowed());
     }
 
@@ -505,6 +496,7 @@ mod tests {
     #[test]
     fn parity_allowed_commands() {
         let config = default_config();
+        let compiled = default_compiled_overrides();
         let keywords = &["git", "rm", "docker", "kubectl"];
         let safe_patterns: Vec<MockSafePattern> = vec![];
         let destructive_patterns: Vec<MockDestructivePattern> = vec![];
@@ -521,11 +513,12 @@ mod tests {
         ];
 
         for cmd in test_cases {
-            let result1 = evaluate_command(cmd, &config, keywords);
+            let result1 = evaluate_command(cmd, &config, keywords, &compiled);
             let result2 = evaluate_command_with_legacy(
                 cmd,
                 &config,
                 keywords,
+                &compiled,
                 &safe_patterns,
                 &destructive_patterns,
             );
@@ -548,6 +541,7 @@ mod tests {
         let mut config = default_config();
         config.packs.enabled.push("containers.docker".to_string());
 
+        let compiled = config.overrides.compile();
         let enabled_packs = config.enabled_pack_ids();
         let keywords_vec = crate::packs::REGISTRY.collect_enabled_keywords(&enabled_packs);
         let keywords: Vec<&str> = keywords_vec.clone();
@@ -559,11 +553,12 @@ mod tests {
         let blocked_commands = ["docker system prune", "docker system prune -a"];
 
         for cmd in blocked_commands {
-            let result1 = evaluate_command(cmd, &config, &keywords);
+            let result1 = evaluate_command(cmd, &config, &keywords, &compiled);
             let result2 = evaluate_command_with_legacy(
                 cmd,
                 &config,
                 &keywords,
+                &compiled,
                 &safe_patterns,
                 &destructive_patterns,
             );
@@ -592,10 +587,12 @@ mod tests {
         let mut config = default_config();
         config.packs.enabled.push("containers.docker".to_string());
         // Add an allow override that permits docker prune
-        config.overrides.allow.push(AllowOverride::Simple(
-            "docker system prune".to_string(),
-        ));
+        config
+            .overrides
+            .allow
+            .push(AllowOverride::Simple("docker system prune".to_string()));
 
+        let compiled = config.overrides.compile();
         let enabled_packs = config.enabled_pack_ids();
         let keywords_vec = crate::packs::REGISTRY.collect_enabled_keywords(&enabled_packs);
         let keywords: Vec<&str> = keywords_vec.clone();
@@ -605,11 +602,12 @@ mod tests {
 
         let cmd = "docker system prune";
 
-        let result1 = evaluate_command(cmd, &config, &keywords);
+        let result1 = evaluate_command(cmd, &config, &keywords, &compiled);
         let result2 = evaluate_command_with_legacy(
             cmd,
             &config,
             &keywords,
+            &compiled,
             &safe_patterns,
             &destructive_patterns,
         );
@@ -636,6 +634,7 @@ mod tests {
             reason: "Blocked by config".to_string(),
         });
 
+        let compiled = config.overrides.compile();
         let keywords = &["ls"]; // Need ls keyword to not quick-reject
 
         let safe_patterns: Vec<MockSafePattern> = vec![];
@@ -643,11 +642,12 @@ mod tests {
 
         let cmd = "ls /secret/files";
 
-        let result1 = evaluate_command(cmd, &config, keywords);
+        let result1 = evaluate_command(cmd, &config, keywords, &compiled);
         let result2 = evaluate_command_with_legacy(
             cmd,
             &config,
             keywords,
+            &compiled,
             &safe_patterns,
             &destructive_patterns,
         );
@@ -671,6 +671,7 @@ mod tests {
     #[test]
     fn legacy_patterns_cause_expected_divergence() {
         let config = default_config();
+        let compiled = default_compiled_overrides();
         let keywords = &["test"];
 
         // Create a legacy destructive pattern that blocks "test dangerous"
@@ -682,17 +683,21 @@ mod tests {
 
         let cmd = "test dangerous command";
 
-        let result1 = evaluate_command(cmd, &config, keywords);
+        let result1 = evaluate_command(cmd, &config, keywords, &compiled);
         let result2 = evaluate_command_with_legacy(
             cmd,
             &config,
             keywords,
+            &compiled,
             &safe_patterns,
             &destructive_patterns,
         );
 
         // evaluate_command (CLI path) allows it (no pack match)
-        assert!(result1.is_allowed(), "evaluate_command should allow (no pack match)");
+        assert!(
+            result1.is_allowed(),
+            "evaluate_command should allow (no pack match)"
+        );
 
         // evaluate_command_with_legacy (hook path) blocks it (legacy match)
         assert!(
@@ -713,6 +718,7 @@ mod tests {
         let mut config = default_config();
         config.packs.enabled.push("containers.docker".to_string());
 
+        let compiled = config.overrides.compile();
         let enabled_packs = config.enabled_pack_ids();
         let keywords_vec = crate::packs::REGISTRY.collect_enabled_keywords(&enabled_packs);
         let keywords: Vec<&str> = keywords_vec.clone();
@@ -723,11 +729,12 @@ mod tests {
         // Command with absolute path (should be normalized)
         let cmd = "/usr/bin/docker system prune";
 
-        let result1 = evaluate_command(cmd, &config, &keywords);
+        let result1 = evaluate_command(cmd, &config, &keywords, &compiled);
         let result2 = evaluate_command_with_legacy(
             cmd,
             &config,
             &keywords,
+            &compiled,
             &safe_patterns,
             &destructive_patterns,
         );

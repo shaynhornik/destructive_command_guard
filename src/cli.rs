@@ -255,8 +255,16 @@ fn test_command(config: &Config, command: &str, extra_packs: Option<Vec<String>>
     let enabled_packs = effective_config.enabled_pack_ids();
     let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
 
+    // Compile overrides once (not per-command)
+    let compiled_overrides = effective_config.overrides.compile();
+
     // Use shared evaluator for consistent behavior with hook mode
-    let result = evaluate_command(command, &effective_config, &enabled_keywords);
+    let result = evaluate_command(
+        command,
+        &effective_config,
+        &enabled_keywords,
+        &compiled_overrides,
+    );
 
     println!("Command: {command}");
     println!();
