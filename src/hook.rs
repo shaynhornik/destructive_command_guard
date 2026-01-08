@@ -137,61 +137,170 @@ pub fn format_denial_message(command: &str, reason: &str) -> String {
 }
 
 /// Print a colorful warning to stderr for human visibility.
+#[allow(clippy::too_many_lines)]
 pub fn print_colorful_warning(command: &str, reason: &str, pack: Option<&str>) {
+    // Box width (content area, excluding border characters)
+    const WIDTH: usize = 70;
+
     let stderr = io::stderr();
     let mut handle = stderr.lock();
 
-    // Top border
-    let border = "═".repeat(72);
-    let _ = writeln!(handle, "\n{}", border.red().bold());
+    let _ = writeln!(handle);
 
-    // Header
-    let header = format!(
-        "{}  {}",
-        "BLOCKED".white().on_red().bold(),
-        "dcg".red().bold()
+    // Top border with corners
+    let _ = writeln!(
+        handle,
+        "{}{}{}",
+        "╭".red(),
+        "─".repeat(WIDTH).red(),
+        "╮".red()
     );
-    let _ = writeln!(handle, "{header}");
+
+    // Shield icon and header
+    let _ = writeln!(
+        handle,
+        "{}  🛡  {}  {}{}",
+        "│".red(),
+        "BLOCKED".white().on_red().bold(),
+        " ".repeat(WIDTH - 16),
+        "│".red()
+    );
+
+    // DCG identifier line
+    let dcg_line = "   Destructive Command Guard (dcg)";
+    let _ = writeln!(
+        handle,
+        "{}{}{}{}",
+        "│".red(),
+        dcg_line.bright_black(),
+        " ".repeat(WIDTH - dcg_line.len()),
+        "│".red()
+    );
+
+    // Separator
+    let _ = writeln!(
+        handle,
+        "{}{}{}",
+        "├".red(),
+        "─".repeat(WIDTH).red().dimmed(),
+        "┤".red()
+    );
 
     // Pack info if available
     if let Some(pack_name) = pack {
-        let _ = writeln!(handle, "{}  {}", "Pack:".bright_black(), pack_name.cyan());
+        let pack_line = format!("  Pack: {pack_name}");
+        let padding = WIDTH.saturating_sub(pack_line.len());
+        let _ = write!(handle, "{}", "│".red());
+        let _ = write!(handle, "  {} ", "Pack:".bright_black());
+        let _ = write!(handle, "{}", pack_name.cyan());
+        let _ = writeln!(handle, "{}{}", " ".repeat(padding - 2), "│".red());
     }
 
-    // Separator
-    let _ = writeln!(handle, "{}", "─".repeat(72).red());
+    // Empty line
+    let _ = writeln!(handle, "{}{}{}", "│".red(), " ".repeat(WIDTH), "│".red());
 
-    // Reason section
-    let _ = writeln!(handle, "{}  {}", "Reason:".yellow().bold(), reason.white());
+    // Reason section - wrap long reasons
+    let reason_label = "  Reason: ";
+    let reason_width = WIDTH - reason_label.len() - 1;
+    let wrapped_reason = wrap_text(reason, reason_width);
 
-    // Command section
-    let _ = writeln!(handle);
+    for (i, line) in wrapped_reason.iter().enumerate() {
+        if i == 0 {
+            let _ = write!(handle, "{}", "│".red());
+            let _ = write!(handle, "  {} ", "Reason:".yellow().bold());
+            let _ = write!(handle, "{}", line.white());
+            let padding = WIDTH.saturating_sub(reason_label.len() + line.len());
+            let _ = writeln!(handle, "{}{}", " ".repeat(padding), "│".red());
+        } else {
+            let indent = " ".repeat(reason_label.len());
+            let padding = WIDTH.saturating_sub(indent.len() + line.len());
+            let _ = write!(handle, "{}", "│".red());
+            let _ = write!(handle, "{}{}", indent, line.white());
+            let _ = writeln!(handle, "{}{}", " ".repeat(padding), "│".red());
+        }
+    }
+
+    // Empty line
+    let _ = writeln!(handle, "{}{}{}", "│".red(), " ".repeat(WIDTH), "│".red());
+
+    // Command section - highlight the dangerous command
+    let _ = write!(handle, "{}", "│".red());
+    let _ = write!(handle, "  {} ", "Command:".cyan().bold());
+
+    // Truncate very long commands for display
+    let display_cmd = if command.len() > 50 {
+        format!("{}...", &command[..47])
+    } else {
+        command.to_string()
+    };
+    let _ = write!(handle, "{}", display_cmd.bright_white().bold());
+    let cmd_line_len = "  Command: ".len() + display_cmd.len();
+    let padding = WIDTH.saturating_sub(cmd_line_len);
+    let _ = writeln!(handle, "{}{}", " ".repeat(padding), "│".red());
+
+    // Separator before help
     let _ = writeln!(
         handle,
-        "{}  {}",
-        "Command:".cyan().bold(),
-        command.bright_white().italic()
+        "{}{}{}",
+        "├".red(),
+        "─".repeat(WIDTH).red().dimmed(),
+        "┤".red()
     );
 
-    // Help section
-    let _ = writeln!(handle);
-    let _ = writeln!(
-        handle,
-        "{} {}",
-        "Tip:".green().bold(),
-        "If you need to run this command, execute it manually in a terminal.".white()
-    );
+    // Help section with lightbulb icon
+    let tip_text = "Run this command manually in a terminal if needed.";
+    let tip_line_len = "     ".len() + tip_text.len();
+    let _ = write!(handle, "{}", "│".red());
+    let _ = write!(handle, "  💡 ");
+    let _ = write!(handle, "{}", tip_text.bright_black());
+    let padding = WIDTH.saturating_sub(tip_line_len);
+    let _ = writeln!(handle, "{}{}", " ".repeat(padding), "│".red());
 
     // Context-specific suggestions
-    print_contextual_suggestion(&mut handle, command);
+    print_contextual_suggestion_boxed(&mut handle, command, WIDTH);
 
-    // Bottom border
-    let _ = writeln!(handle, "{}\n", border.red().bold());
+    // Bottom border with corners
+    let _ = writeln!(
+        handle,
+        "{}{}{}",
+        "╰".red(),
+        "─".repeat(WIDTH).red(),
+        "╯".red()
+    );
+    let _ = writeln!(handle);
 }
 
-/// Print context-specific suggestions based on the blocked command.
-fn print_contextual_suggestion(handle: &mut io::StderrLock<'_>, command: &str) {
-    let suggestion = if command.contains("reset") || command.contains("checkout") {
+/// Wrap text to fit within a given width.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current_line = String::new();
+
+    for word in text.split_whitespace() {
+        if current_line.is_empty() {
+            current_line = word.to_string();
+        } else if current_line.len() + 1 + word.len() <= width {
+            current_line.push(' ');
+            current_line.push_str(word);
+        } else {
+            lines.push(current_line);
+            current_line = word.to_string();
+        }
+    }
+
+    if !current_line.is_empty() {
+        lines.push(current_line);
+    }
+
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+
+    lines
+}
+
+/// Get context-specific suggestion based on the blocked command.
+fn get_contextual_suggestion(command: &str) -> Option<&'static str> {
+    if command.contains("reset") || command.contains("checkout") {
         Some("Consider using 'git stash' first to save your changes.")
     } else if command.contains("clean") {
         Some("Use 'git clean -n' first to preview what would be deleted.")
@@ -209,10 +318,17 @@ fn print_contextual_suggestion(handle: &mut io::StderrLock<'_>, command: &str) {
         Some("Use 'terraform plan -destroy' to preview changes first.")
     } else {
         None
-    };
+    }
+}
 
-    if let Some(msg) = suggestion {
-        let _ = writeln!(handle, "     {}", msg.bright_black());
+/// Print context-specific suggestions in a boxed format.
+fn print_contextual_suggestion_boxed(handle: &mut io::StderrLock<'_>, command: &str, width: usize) {
+    if let Some(msg) = get_contextual_suggestion(command) {
+        let suggestion_line_len = "       ".len() + msg.len();
+        let _ = write!(handle, "{}", "│".red());
+        let _ = write!(handle, "       {}", msg.green());
+        let padding = width.saturating_sub(suggestion_line_len);
+        let _ = writeln!(handle, "{}{}", " ".repeat(padding), "│".red());
     }
 }
 

@@ -59,19 +59,19 @@ static HEREDOC_TRIGGERS: LazyLock<RegexSet> = LazyLock::new(|| {
         // Heredoc operators (bash, sh, zsh)
         r"<<-?\s*['\x22]?\w+['\x22]?", // << or <<- with optional quotes
         r"<<<",                        // Here-strings (bash)
-        // Python inline execution (python3? matches python and python3)
-        r"\bpython3?\s+-[ce]\s",
-        // Ruby inline execution
-        r"\bruby\s+-e\s",
-        r"\birb\s+-e\s",
-        // Perl inline execution
-        r"\bperl\s+-[eE]\s",
-        // Node.js inline execution
-        r"\bnode\s+-[ep]\s",
+        // Python inline execution (matches python, python3, python3.11, python3.12.1, etc.)
+        r"\bpython[0-9.]*\s+-[ce]\s",
+        // Ruby inline execution (matches ruby, ruby3, ruby3.0, etc.)
+        r"\bruby[0-9.]*\s+-e\s",
+        r"\birb[0-9.]*\s+-e\s",
+        // Perl inline execution (matches perl, perl5, perl5.36, etc.)
+        r"\bperl[0-9.]*\s+-[eE]\s",
+        // Node.js inline execution (matches node, node18, nodejs, nodejs18, etc.)
+        r"\bnode(js)?[0-9.]*\s+-[ep]\s",
         // Shell inline execution (sh -c, bash -c, zsh -c, fish -c)
         r"\b(sh|bash|zsh|fish)\s+-c\s",
-        // Piped execution to interpreters
-        r"\|\s*(python3?|ruby|perl|node|sh|bash)\b",
+        // Piped execution to interpreters (versioned)
+        r"\|\s*(python[0-9.]*|ruby[0-9.]*|perl[0-9.]*|node(js)?[0-9.]*|sh|bash)\b",
         // Piped to xargs (can execute arbitrary commands)
         r"\|\s*xargs\s",
         // exec/eval in various contexts
@@ -242,19 +242,25 @@ impl ScriptLanguage {
 
         // Extract interpreter: handle both direct paths and env-style shebangs
         // Examples:
-        //   #!/bin/bash           -> bash
-        //   #!/bin/bash -e        -> bash (ignores flags)
-        //   #!/usr/bin/env python3 -> python3
+        //   #!/bin/bash              -> bash
+        //   #!/bin/bash -e           -> bash (ignores flags)
+        //   #!/usr/bin/env python3   -> python3
         //   #!/usr/bin/env python3 -u -> python3 (ignores flags)
-        //   #!/usr/bin/python     -> python
+        //   #!/usr/bin/env -S python3 -u -> python3 (skips env flags)
+        //   #!/usr/bin/python        -> python
         let mut parts = shebang.split_whitespace();
         let first = parts.next()?;
         let basename = first.rsplit('/').next().unwrap_or(first);
 
-        // If it's "env", the interpreter is the next argument
+        // If it's "env", skip any flags (starting with -) to find the interpreter
         let interpreter = if basename == "env" {
-            let next = parts.next()?;
-            next.rsplit('/').next().unwrap_or(next)
+            // Skip env flags like -S, -i, -u, etc.
+            loop {
+                let next = parts.next()?;
+                if !next.starts_with('-') {
+                    break next.rsplit('/').next().unwrap_or(next);
+                }
+            }
         } else {
             basename
         };
@@ -409,6 +415,7 @@ impl ScriptLanguage {
     /// - `python3 -c "code"` → "python3"
     /// - `/usr/bin/python -c "code"` → "python"
     /// - `env python3 -c "code"` → "python3"
+    /// - `env -S python3 -c "code"` → "python3" (skips env flags)
     /// - `bash -c "code"` → "bash"
     fn extract_interpreter(cmd: &str) -> Option<String> {
         let mut parts = cmd.split_whitespace();
@@ -417,11 +424,15 @@ impl ScriptLanguage {
         // Get basename (strip path)
         let basename = first.rsplit('/').next().unwrap_or(first);
 
-        // If it's "env", the interpreter is the next argument
+        // If it's "env", skip any flags and get the interpreter
         if basename == "env" {
-            let next = parts.next()?;
-            let next_basename = next.rsplit('/').next().unwrap_or(next);
-            return Some(next_basename.to_string());
+            loop {
+                let next = parts.next()?;
+                if !next.starts_with('-') {
+                    let next_basename = next.rsplit('/').next().unwrap_or(next);
+                    return Some(next_basename.to_string());
+                }
+            }
         }
 
         Some(basename.to_string())
@@ -602,7 +613,8 @@ static HERESTRING_UNQUOTED: LazyLock<Regex> = LazyLock::new(|| {
 static INLINE_SCRIPT_SINGLE_QUOTE: LazyLock<Regex> = LazyLock::new(|| {
     // Matches: command -c/-e/-p/-E followed by single-quoted content
     // Groups: (1) command, (2) flag, (3) content
-    Regex::new(r"\b(python3?|ruby|irb|perl|node|sh|bash|zsh|fish)\s+(-[ceEp])\s+'([^']*)'")
+    // Supports versioned interpreters: python3.11, ruby3.0, perl5.36, node18, nodejs20, etc.
+    Regex::new(r"\b(python[0-9.]*|ruby[0-9.]*|irb[0-9.]*|perl[0-9.]*|node(js)?[0-9.]*|sh|bash|zsh|fish)\s+(-[ceEp])\s+'([^']*)'")
         .expect("inline script single-quote regex compiles")
 });
 
@@ -610,7 +622,8 @@ static INLINE_SCRIPT_SINGLE_QUOTE: LazyLock<Regex> = LazyLock::new(|| {
 static INLINE_SCRIPT_DOUBLE_QUOTE: LazyLock<Regex> = LazyLock::new(|| {
     // Matches: command -c/-e/-p/-E followed by double-quoted content
     // Groups: (1) command, (2) flag, (3) content
-    Regex::new(r#"\b(python3?|ruby|irb|perl|node|sh|bash|zsh|fish)\s+(-[ceEp])\s+"([^"]*)""#)
+    // Supports versioned interpreters: python3.11, ruby3.0, perl5.36, node18, nodejs20, etc.
+    Regex::new(r#"\b(python[0-9.]*|ruby[0-9.]*|irb[0-9.]*|perl[0-9.]*|node(js)?[0-9.]*|sh|bash|zsh|fish)\s+(-[ceEp])\s+"([^"]*)""#)
         .expect("inline script double-quote regex compiles")
 });
 
@@ -755,8 +768,8 @@ fn extract_inline_scripts(
             }
 
             let cmd_name = cap.get(1).map_or("", |m| m.as_str());
-            // Content is now in group 3 (command, flag, content)
-            let content = cap.get(3).map_or("", |m| m.as_str());
+            // Content is in group 4: (1) interpreter, (2) optional "js", (3) flag, (4) content
+            let content = cap.get(4).map_or("", |m| m.as_str());
 
             // Enforce content size limit
             if content.len() > limits.max_body_bytes {
@@ -878,7 +891,16 @@ fn extract_heredocs(
         // Find the terminating delimiter
         match extract_heredoc_body(command, start_pos, delimiter, heredoc_type, limits) {
             Some(content) => {
-                let end_pos = start_pos + content.len() + delimiter.len() + 1; // +1 for newline
+                // Calculate byte range end position:
+                // +1 for leading newline after heredoc marker
+                // +content.len() for the body
+                // +1 for newline before delimiter (only if content is non-empty)
+                // +delimiter.len() for the terminating delimiter
+                let end_pos = start_pos
+                    + 1
+                    + content.len()
+                    + usize::from(!content.is_empty())
+                    + delimiter.len();
 
                 extracted.push(ExtractedContent {
                     content,
@@ -1072,6 +1094,36 @@ mod tests {
                     check_triggers(cmd),
                     TriggerResult::Triggered,
                     "should trigger on python inline: {cmd}"
+                );
+            }
+        }
+
+        #[test]
+        fn triggers_on_versioned_interpreters() {
+            // Tier 1 MUST have zero false negatives - versioned interpreters must trigger
+            let versioned_commands = [
+                // Python versions
+                "python3.11 -c 'import os'",
+                "python3.12.1 -c 'import os'",
+                "python3.9 -e 'print(1)'",
+                // Ruby versions
+                "ruby3.0 -e 'puts 1'",
+                "ruby3.2.1 -e 'exit'",
+                // Perl versions
+                "perl5.36 -e 'print 1'",
+                "perl5.38.2 -E 'say 1'",
+                // Node versions
+                "node18 -e 'console.log(1)'",
+                "node20.1 -p 'process.version'",
+                "nodejs18 -e 'console.log(1)'",
+                "nodejs20.10.0 -e 'test'",
+            ];
+
+            for cmd in versioned_commands {
+                assert_eq!(
+                    check_triggers(cmd),
+                    TriggerResult::Triggered,
+                    "should trigger on versioned interpreter: {cmd}"
                 );
             }
         }
@@ -1307,6 +1359,46 @@ mod tests {
         }
 
         #[test]
+        fn heredoc_byte_range_is_correct() {
+            // Test non-empty heredoc byte_range
+            let cmd = "python << END\nprint(1)\nEND";
+            let result = extract_content(cmd, &ExtractionLimits::default());
+            if let ExtractionResult::Extracted(contents) = result {
+                assert_eq!(contents.len(), 1);
+                let range = &contents[0].byte_range;
+                // byte_range should cover from "<< END" to the final "END"
+                let extracted_span = &cmd[range.clone()];
+                assert_eq!(extracted_span, "<< END\nprint(1)\nEND");
+            } else {
+                panic!("Expected Extracted result");
+            }
+
+            // Test empty heredoc byte_range
+            let cmd = "cat << EOF\nEOF";
+            let result = extract_content(cmd, &ExtractionLimits::default());
+            if let ExtractionResult::Extracted(contents) = result {
+                assert_eq!(contents.len(), 1);
+                let range = &contents[0].byte_range;
+                let extracted_span = &cmd[range.clone()];
+                assert_eq!(extracted_span, "<< EOF\nEOF");
+            } else {
+                panic!("Expected Extracted result");
+            }
+
+            // Test multi-line heredoc byte_range
+            let cmd = "cat << EOF\nline1\nline2\nEOF";
+            let result = extract_content(cmd, &ExtractionLimits::default());
+            if let ExtractionResult::Extracted(contents) = result {
+                assert_eq!(contents.len(), 1);
+                let range = &contents[0].byte_range;
+                let extracted_span = &cmd[range.clone()];
+                assert_eq!(extracted_span, "<< EOF\nline1\nline2\nEOF");
+            } else {
+                panic!("Expected Extracted result");
+            }
+        }
+
+        #[test]
         fn extracts_here_string_with_nested_quotes() {
             // Here-string with double quotes inside single quotes
             let result = extract_content(
@@ -1488,6 +1580,31 @@ mod tests {
             assert_eq!(
                 ScriptLanguage::from_shebang("#!/usr/bin/env ruby -w\nputs 'hi'"),
                 Some(ScriptLanguage::Ruby)
+            );
+        }
+
+        #[test]
+        fn from_shebang_handles_env_flags() {
+            // env -S splits remaining arguments (GNU coreutils 8.30+)
+            assert_eq!(
+                ScriptLanguage::from_shebang("#!/usr/bin/env -S python3 -u\nimport sys"),
+                Some(ScriptLanguage::Python)
+            );
+            assert_eq!(
+                ScriptLanguage::from_shebang("#!/usr/bin/env -S bash -e\necho hi"),
+                Some(ScriptLanguage::Bash)
+            );
+
+            // env -i ignores environment
+            assert_eq!(
+                ScriptLanguage::from_shebang("#!/usr/bin/env -i python3\nimport os"),
+                Some(ScriptLanguage::Python)
+            );
+
+            // Multiple env flags
+            assert_eq!(
+                ScriptLanguage::from_shebang("#!/usr/bin/env -i -S perl -w\nuse strict;"),
+                Some(ScriptLanguage::Perl)
             );
         }
 
@@ -1683,6 +1800,22 @@ mod tests {
                 assert_eq!(contents[1].content, "code2");
             } else {
                 panic!("Expected Extracted result");
+            }
+        }
+
+        #[test]
+        fn extracts_versioned_interpreter_scripts() {
+            // Tier 2 must extract content from versioned interpreters
+            let cmd = "python3.11 -c 'import os' && nodejs18 -e 'console.log(1)'";
+            let result = extract_content(cmd, &ExtractionLimits::default());
+            if let ExtractionResult::Extracted(contents) = result {
+                assert_eq!(contents.len(), 2, "should extract both scripts");
+                assert_eq!(contents[0].content, "import os");
+                assert_eq!(contents[0].language, ScriptLanguage::Python);
+                assert_eq!(contents[1].content, "console.log(1)");
+                assert_eq!(contents[1].language, ScriptLanguage::JavaScript);
+            } else {
+                panic!("Expected Extracted result for versioned interpreters, got {result:?}");
             }
         }
 

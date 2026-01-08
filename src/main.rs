@@ -316,18 +316,77 @@ fn configure_colors() {
 
 /// Print version information and exit.
 fn print_version() {
-    let version_line = format!("{} {}", "dcg".green().bold(), PKG_VERSION.cyan());
-    eprintln!("{version_line}");
+    // ASCII art logo - compact shield design
+    eprintln!();
+    eprintln!(
+        "  {}",
+        "╭─────────────────────────────────────────╮".bright_black()
+    );
+    eprintln!(
+        "  {}  🛡  {}               {}",
+        "│".bright_black(),
+        "Destructive Command Guard".white().bold(),
+        "│".bright_black()
+    );
+    eprintln!(
+        "  {}     {}                           {}",
+        "│".bright_black(),
+        format!("dcg v{PKG_VERSION}").cyan().bold(),
+        "│".bright_black()
+    );
+    eprintln!(
+        "  {}                                         {}",
+        "│".bright_black(),
+        "│".bright_black()
+    );
 
+    // Build info
     if let Some(ts) = BUILD_TIMESTAMP {
-        eprintln!("  {} {}", "Built:".bright_black(), ts.white());
+        // Extract just the date part for cleaner display
+        let date = ts.split('T').next().unwrap_or(ts);
+        eprintln!(
+            "  {}  {} {}                   {}",
+            "│".bright_black(),
+            "Built:".bright_black(),
+            date.white(),
+            "│".bright_black()
+        );
     }
     if let Some(rustc) = RUSTC_SEMVER {
-        eprintln!("  {} {}", "Rustc:".bright_black(), rustc.white());
+        eprintln!(
+            "  {}  {} {}                      {}",
+            "│".bright_black(),
+            "Rustc:".bright_black(),
+            rustc.white(),
+            "│".bright_black()
+        );
     }
     if let Some(target) = CARGO_TARGET {
-        eprintln!("  {} {}", "Target:".bright_black(), target.white());
+        eprintln!(
+            "  {}  {} {}         {}",
+            "│".bright_black(),
+            "Target:".bright_black(),
+            target.white(),
+            "│".bright_black()
+        );
     }
+
+    eprintln!(
+        "  {}                                         {}",
+        "│".bright_black(),
+        "│".bright_black()
+    );
+    eprintln!(
+        "  {}  {}  {}",
+        "│".bright_black(),
+        "Protecting your code from destructive ops".green(),
+        "│".bright_black()
+    );
+    eprintln!(
+        "  {}",
+        "╰─────────────────────────────────────────╯".bright_black()
+    );
+    eprintln!();
 }
 
 fn main() {
@@ -474,53 +533,106 @@ fn main() {
 
 /// Print help information.
 fn print_help() {
+    eprintln!();
+    eprintln!("  🛡  {} {}", "dcg".green().bold(), PKG_VERSION.cyan());
     eprintln!(
-        "{} {} - {}",
-        "dcg".green().bold(),
-        PKG_VERSION.cyan(),
-        "A Claude Code hook that blocks destructive commands".white()
+        "     {}",
+        "Destructive Command Guard - A Claude Code safety hook".bright_black()
     );
     eprintln!();
-    eprintln!("{}", "USAGE:".yellow().bold());
+
+    // Usage section
+    eprintln!("  {}", "USAGE".yellow().bold());
+    eprintln!("  {}", "─".repeat(50).bright_black());
     eprintln!(
-        "    This tool is designed to run as a Claude Code {} hook.",
+        "    This tool runs as a Claude Code {} hook.",
         "PreToolUse".cyan()
     );
     eprintln!("    It reads JSON from stdin and outputs JSON to stdout.");
     eprintln!();
-    eprintln!("{}", "CONFIGURATION:".yellow().bold());
+
+    // Configuration section
+    eprintln!("  {}", "CONFIGURATION".yellow().bold());
+    eprintln!("  {}", "─".repeat(50).bright_black());
     eprintln!("    Add to {}:", "~/.claude/settings.json".cyan());
     eprintln!();
     eprintln!(
         "    {}",
-        r#"{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "dcg"}]}]}}"#
-            .bright_black()
+        "╭──────────────────────────────────────────────────────────────╮".bright_black()
+    );
+    eprintln!(
+        "    {} {} {}",
+        "│".bright_black(),
+        r#"{"hooks": {"PreToolUse": [{"matcher": "Bash","#.white(),
+        "│".bright_black()
+    );
+    eprintln!(
+        "    {}   {} {}",
+        "│".bright_black(),
+        r#""hooks": [{"type": "command", "command": "dcg"}]}]}}"#.white(),
+        "│".bright_black()
+    );
+    eprintln!(
+        "    {}",
+        "╰──────────────────────────────────────────────────────────────╯".bright_black()
     );
     eprintln!();
-    eprintln!("{}", "OPTIONS:".yellow().bold());
+
+    // Options section
+    eprintln!("  {}", "OPTIONS".yellow().bold());
+    eprintln!("  {}", "─".repeat(50).bright_black());
     eprintln!(
-        "    {}    Print version information",
+        "    {}     Print version information",
         "--version, -V".green()
     );
-    eprintln!("    {}       Print this help message", "--help, -h".green());
-    eprintln!();
-    eprintln!("{}", "BLOCKED COMMANDS:".yellow().bold());
     eprintln!(
-        "    {} git reset --hard, git checkout --, git restore (without --staged)",
-        "Git:".red()
-    );
-    eprintln!("         git clean -f, git push --force, git branch -D, git stash drop/clear");
-    eprintln!(
-        "    {} rm -rf outside of /tmp, /var/tmp, or $TMPDIR",
-        "Filesystem:".red()
+        "    {}        Print this help message",
+        "--help, -h".green()
     );
     eprintln!();
+
+    // Blocked commands section
+    eprintln!("  {}", "BLOCKED COMMANDS".yellow().bold());
+    eprintln!("  {}", "─".repeat(50).bright_black());
+    eprintln!();
     eprintln!(
-        "For more information: {}",
+        "    {} {}",
+        "Git".red().bold(),
+        "(core.git pack)".bright_black()
+    );
+    eprintln!("      {} git reset --hard", "•".red());
+    eprintln!("      {} git checkout -- <path>", "•".red());
+    eprintln!("      {} git restore (without --staged)", "•".red());
+    eprintln!("      {} git clean -f", "•".red());
+    eprintln!("      {} git push --force", "•".red());
+    eprintln!("      {} git branch -D", "•".red());
+    eprintln!("      {} git stash drop/clear", "•".red());
+    eprintln!();
+    eprintln!(
+        "    {} {}",
+        "Filesystem".red().bold(),
+        "(core.filesystem pack)".bright_black()
+    );
+    eprintln!(
+        "      {} rm -rf outside of /tmp, /var/tmp, $TMPDIR",
+        "•".red()
+    );
+    eprintln!();
+
+    // Additional packs note
+    eprintln!("    📦 Additional packs: containers.docker, kubernetes.kubectl,");
+    eprintln!("       databases.sql, cloud.terraform, and more.");
+    eprintln!();
+
+    // Links section
+    eprintln!("  {}", "─".repeat(50).bright_black());
+    eprintln!(
+        "    📖 {}",
         "https://github.com/Dicklesworthstone/destructive_command_guard"
             .blue()
             .underline()
     );
+    eprintln!();
 }
 
 #[cfg(test)]

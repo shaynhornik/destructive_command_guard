@@ -1,0 +1,580 @@
+//! Allowlist file parsing and layered loading.
+//!
+//! This module implements loading of allowlist entries from three layers:
+//! - Project: `.dcg/allowlist.toml` at repo root
+//! - User: `~/.config/dcg/allowlist.toml`
+//! - System: `/etc/dcg/allowlist.toml` (optional)
+//!
+//! Design goals:
+//! - Strongly-typed model (`AllowEntry`, `AllowSelector`)
+//! - Robust parsing: invalid TOML or invalid entries must not crash the hook
+//! - Explicit, testable layering precedence (project > user > system)
+
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// Allowlist layer identity (used for precedence and diagnostics).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AllowlistLayer {
+    Project,
+    User,
+    System,
+}
+
+impl AllowlistLayer {
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::User => "user",
+            Self::System => "system",
+        }
+    }
+}
+
+/// A stable rule identifier (`pack_id:pattern_name`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RuleId {
+    pub pack_id: String,
+    pub pattern_name: String,
+}
+
+impl RuleId {
+    /// Parse a `pack_id:pattern_name` rule id.
+    ///
+    /// Notes:
+    /// - This does not validate that the referenced pack/pattern exists.
+    /// - Wildcards (e.g., `core.git:*`) are parsed but higher-level validation
+    ///   policies are handled by later tasks.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        let (pack_id, pattern_name) = s.split_once(':')?;
+        let pack_id = pack_id.trim();
+        let pattern_name = pattern_name.trim();
+
+        if pack_id.is_empty() || pattern_name.is_empty() {
+            return None;
+        }
+
+        // Reject whitespace inside identifiers to avoid ambiguous parsing.
+        if pack_id.contains(char::is_whitespace) || pattern_name.contains(char::is_whitespace) {
+            return None;
+        }
+
+        Some(Self {
+            pack_id: pack_id.to_string(),
+            pattern_name: pattern_name.to_string(),
+        })
+    }
+}
+
+impl std::fmt::Display for RuleId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.pack_id, self.pattern_name)
+    }
+}
+
+/// What an allowlist entry targets.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum AllowSelector {
+    /// Allowlist a specific rule identity (`pack_id:pattern_name`).
+    Rule(RuleId),
+    /// Allowlist an exact command string (rare, but useful for one-off automation).
+    ExactCommand(String),
+    /// Allowlist a command prefix (used with a context classifier like "string-argument").
+    CommandPrefix(String),
+    /// Allowlist by raw regex pattern (requires explicit risk acknowledgement).
+    RegexPattern(String),
+}
+
+impl AllowSelector {
+    #[must_use]
+    pub const fn kind_label(&self) -> &'static str {
+        match self {
+            Self::Rule(_) => "rule",
+            Self::ExactCommand(_) => "exact_command",
+            Self::CommandPrefix(_) => "command_prefix",
+            Self::RegexPattern(_) => "pattern",
+        }
+    }
+}
+
+/// A single allowlist entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllowEntry {
+    pub selector: AllowSelector,
+    pub reason: String,
+
+    // Audit metadata (optional)
+    pub added_by: Option<String>,
+    pub added_at: Option<String>,
+    pub expires_at: Option<String>,
+
+    // Optional match context hint (used for data-only allowlisting)
+    pub context: Option<String>,
+
+    // Optional gating
+    pub conditions: HashMap<String, String>,
+    pub environments: Vec<String>,
+
+    // Safety valve for regex-based allowlisting
+    pub risk_acknowledged: bool,
+}
+
+/// Structured allowlist parse/load error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllowlistError {
+    pub layer: AllowlistLayer,
+    pub path: PathBuf,
+    pub entry_index: Option<usize>,
+    pub message: String,
+}
+
+/// Parsed allowlist file contents (entries + non-fatal errors).
+#[derive(Debug, Clone, Default)]
+pub struct AllowlistFile {
+    pub entries: Vec<AllowEntry>,
+    pub errors: Vec<AllowlistError>,
+}
+
+/// A single loaded allowlist layer (with source path).
+#[derive(Debug, Clone)]
+pub struct LoadedAllowlistLayer {
+    pub layer: AllowlistLayer,
+    pub path: PathBuf,
+    pub file: AllowlistFile,
+}
+
+/// All allowlist layers, ordered by precedence (project > user > system).
+#[derive(Debug, Clone)]
+pub struct LayeredAllowlist {
+    pub layers: Vec<LoadedAllowlistLayer>,
+}
+
+impl LayeredAllowlist {
+    /// Construct a layered allowlist from explicit file paths.
+    ///
+    /// Any missing path is treated as an empty allowlist for that layer.
+    #[must_use]
+    pub fn load_from_paths(
+        project: Option<PathBuf>,
+        user: Option<PathBuf>,
+        system: Option<PathBuf>,
+    ) -> Self {
+        let mut layers: Vec<LoadedAllowlistLayer> = Vec::new();
+
+        if let Some(path) = project {
+            layers.push(LoadedAllowlistLayer {
+                layer: AllowlistLayer::Project,
+                path: path.clone(),
+                file: load_allowlist_file(AllowlistLayer::Project, &path),
+            });
+        }
+
+        if let Some(path) = user {
+            layers.push(LoadedAllowlistLayer {
+                layer: AllowlistLayer::User,
+                path: path.clone(),
+                file: load_allowlist_file(AllowlistLayer::User, &path),
+            });
+        }
+
+        if let Some(path) = system {
+            layers.push(LoadedAllowlistLayer {
+                layer: AllowlistLayer::System,
+                path: path.clone(),
+                file: load_allowlist_file(AllowlistLayer::System, &path),
+            });
+        }
+
+        Self { layers }
+    }
+
+    /// Find the first matching rule entry across layers (project > user > system).
+    #[must_use]
+    pub fn lookup_rule(&self, rule: &RuleId) -> Option<(&AllowEntry, AllowlistLayer)> {
+        for layer in &self.layers {
+            for entry in &layer.file.entries {
+                if let AllowSelector::Rule(rule_id) = &entry.selector {
+                    if rule_id == rule {
+                        return Some((entry, layer.layer));
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Load allowlist files using the default locations.
+///
+/// Missing files are treated as empty allowlists.
+/// Invalid TOML is treated as empty for that layer and reported in `errors`.
+#[must_use]
+pub fn load_default_allowlists() -> LayeredAllowlist {
+    let project = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| find_repo_root(&cwd))
+        .map(|root| root.join(".dcg").join("allowlist.toml"));
+
+    let user = dirs::config_dir().map(|d| d.join("dcg").join("allowlist.toml"));
+
+    // System allowlist is optional; keep the fixed path but treat missing as empty.
+    let system = Some(PathBuf::from("/etc/dcg/allowlist.toml"));
+
+    LayeredAllowlist::load_from_paths(project, user, system)
+}
+
+fn find_repo_root(start: &Path) -> Option<PathBuf> {
+    let mut current = start.to_path_buf();
+
+    loop {
+        if current.join(".git").exists() {
+            return Some(current);
+        }
+
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+fn load_allowlist_file(layer: AllowlistLayer, path: &Path) -> AllowlistFile {
+    if !path.exists() {
+        return AllowlistFile::default();
+    }
+
+    let content = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            return AllowlistFile {
+                entries: Vec::new(),
+                errors: vec![AllowlistError {
+                    layer,
+                    path: path.to_path_buf(),
+                    entry_index: None,
+                    message: format!("failed to read allowlist file: {e}"),
+                }],
+            };
+        }
+    };
+
+    parse_allowlist_toml(layer, path, &content)
+}
+
+fn parse_allowlist_toml(layer: AllowlistLayer, path: &Path, content: &str) -> AllowlistFile {
+    let mut file = AllowlistFile::default();
+
+    let value: toml::Value = match toml::from_str(content) {
+        Ok(v) => v,
+        Err(e) => {
+            file.errors.push(AllowlistError {
+                layer,
+                path: path.to_path_buf(),
+                entry_index: None,
+                message: format!("invalid TOML: {e}"),
+            });
+            return file;
+        }
+    };
+
+    let Some(root) = value.as_table() else {
+        file.errors.push(AllowlistError {
+            layer,
+            path: path.to_path_buf(),
+            entry_index: None,
+            message: "allowlist TOML root must be a table".to_string(),
+        });
+        return file;
+    };
+
+    let allow_items = root.get("allow");
+    let Some(allow_items) = allow_items else {
+        // No entries is fine.
+        return file;
+    };
+
+    let Some(allow_array) = allow_items.as_array() else {
+        file.errors.push(AllowlistError {
+            layer,
+            path: path.to_path_buf(),
+            entry_index: None,
+            message: "`allow` must be an array of tables (use [[allow]])".to_string(),
+        });
+        return file;
+    };
+
+    for (idx, item) in allow_array.iter().enumerate() {
+        let Some(tbl) = item.as_table() else {
+            file.errors.push(AllowlistError {
+                layer,
+                path: path.to_path_buf(),
+                entry_index: Some(idx),
+                message: "each [[allow]] entry must be a table".to_string(),
+            });
+            continue;
+        };
+
+        match parse_allow_entry(tbl) {
+            Ok(entry) => file.entries.push(entry),
+            Err(msg) => file.errors.push(AllowlistError {
+                layer,
+                path: path.to_path_buf(),
+                entry_index: Some(idx),
+                message: msg,
+            }),
+        }
+    }
+
+    file
+}
+
+fn parse_allow_entry(tbl: &toml::value::Table) -> Result<AllowEntry, String> {
+    let reason = match get_string(tbl, "reason") {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => return Err("missing required field: reason".to_string()),
+    };
+
+    let rule = get_string(tbl, "rule");
+    let exact_command = get_string(tbl, "exact_command");
+    let command_prefix = get_string(tbl, "command_prefix");
+    let pattern = get_string(tbl, "pattern");
+
+    let mut selector: Option<AllowSelector> = None;
+    let mut selector_count = 0usize;
+
+    if let Some(rule) = rule {
+        selector_count += 1;
+        let rule_id = RuleId::parse(&rule)
+            .ok_or_else(|| "invalid rule id (expected pack_id:pattern_name)".to_string())?;
+        selector = Some(AllowSelector::Rule(rule_id));
+    }
+    if let Some(cmd) = exact_command {
+        selector_count += 1;
+        selector = Some(AllowSelector::ExactCommand(cmd));
+    }
+    if let Some(prefix) = command_prefix {
+        selector_count += 1;
+        selector = Some(AllowSelector::CommandPrefix(prefix));
+    }
+    if let Some(re) = pattern {
+        selector_count += 1;
+        selector = Some(AllowSelector::RegexPattern(re));
+    }
+
+    if selector_count == 0 {
+        return Err(
+            "missing selector: one of rule, exact_command, command_prefix, pattern".to_string(),
+        );
+    }
+    if selector_count > 1 {
+        return Err("invalid entry: specify exactly one selector field".to_string());
+    }
+
+    let added_by = get_string(tbl, "added_by");
+    let added_at = get_timestamp_string(tbl, "added_at");
+    let expires_at = get_timestamp_string(tbl, "expires_at");
+
+    let context = get_string(tbl, "context");
+
+    let risk_acknowledged = tbl
+        .get("risk_acknowledged")
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false);
+
+    let environments = match tbl.get("environments") {
+        None => Vec::new(),
+        Some(v) => {
+            let Some(arr) = v.as_array() else {
+                return Err("environments must be an array of strings".to_string());
+            };
+            let mut envs = Vec::new();
+            for item in arr {
+                let Some(s) = item.as_str() else {
+                    return Err("environments must be an array of strings".to_string());
+                };
+                envs.push(s.to_string());
+            }
+            envs
+        }
+    };
+
+    let conditions = match tbl.get("conditions") {
+        None => HashMap::new(),
+        Some(v) => {
+            let Some(t) = v.as_table() else {
+                return Err("conditions must be a table of strings".to_string());
+            };
+            let mut out: HashMap<String, String> = HashMap::new();
+            for (k, v) in t {
+                let Some(s) = v.as_str() else {
+                    return Err("conditions must be a table of strings".to_string());
+                };
+                out.insert(k.clone(), s.to_string());
+            }
+            out
+        }
+    };
+
+    Ok(AllowEntry {
+        selector: selector.expect("selector_count ensured selector exists"),
+        reason,
+        added_by,
+        added_at,
+        expires_at,
+        context,
+        conditions,
+        environments,
+        risk_acknowledged,
+    })
+}
+
+fn get_string(tbl: &toml::value::Table, key: &str) -> Option<String> {
+    tbl.get(key)
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string)
+}
+
+fn get_timestamp_string(tbl: &toml::value::Table, key: &str) -> Option<String> {
+    let v = tbl.get(key)?;
+    if let Some(s) = v.as_str() {
+        return Some(s.to_string());
+    }
+    if let Some(dt) = v.as_datetime() {
+        return Some(dt.to_string());
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_valid_allowlist_entries() {
+        let toml = r#"
+            [[allow]]
+            rule = "core.git:reset-hard"
+            reason = "intentional for migrations"
+            added_by = "alice@example.com"
+            added_at = "2026-01-08T01:23:45Z"
+            expires_at = 2026-02-01T00:00:00Z
+
+            [[allow]]
+            exact_command = "rm -rf /tmp/dcg-test-artifacts"
+            reason = "test cleanup"
+
+            [[allow]]
+            command_prefix = "bd create"
+            context = "string-argument"
+            reason = "docs-only args"
+
+            [[allow]]
+            pattern = "echo\\s+\\\"Example:.*rm -rf.*\\\""
+            reason = "documentation examples"
+            risk_acknowledged = true
+        "#;
+
+        let file = parse_allowlist_toml(AllowlistLayer::Project, Path::new("dummy"), toml);
+        assert!(
+            file.errors.is_empty(),
+            "expected no errors, got: {:#?}",
+            file.errors
+        );
+        assert_eq!(file.entries.len(), 4);
+    }
+
+    #[test]
+    fn invalid_toml_is_non_fatal() {
+        let file = parse_allowlist_toml(
+            AllowlistLayer::User,
+            Path::new("dummy"),
+            "this is not = valid toml [",
+        );
+        assert!(file.entries.is_empty());
+        assert_eq!(file.errors.len(), 1);
+        assert!(file.errors[0].message.contains("invalid TOML"));
+    }
+
+    #[test]
+    fn missing_reason_is_flagged() {
+        let toml = r#"
+            [[allow]]
+            rule = "core.git:reset-hard"
+        "#;
+        let file = parse_allowlist_toml(AllowlistLayer::Project, Path::new("dummy"), toml);
+        assert!(file.entries.is_empty());
+        assert_eq!(file.errors.len(), 1);
+        assert!(
+            file.errors[0]
+                .message
+                .contains("missing required field: reason")
+        );
+    }
+
+    #[test]
+    fn missing_selector_is_flagged() {
+        let toml = r#"
+            [[allow]]
+            reason = "no selector here"
+        "#;
+        let file = parse_allowlist_toml(AllowlistLayer::Project, Path::new("dummy"), toml);
+        assert!(file.entries.is_empty());
+        assert_eq!(file.errors.len(), 1);
+        assert!(file.errors[0].message.contains("missing selector"));
+    }
+
+    #[test]
+    fn multiple_selectors_are_flagged() {
+        let toml = r#"
+            [[allow]]
+            rule = "core.git:reset-hard"
+            exact_command = "git reset --hard"
+            reason = "too broad"
+        "#;
+        let file = parse_allowlist_toml(AllowlistLayer::Project, Path::new("dummy"), toml);
+        assert!(file.entries.is_empty());
+        assert_eq!(file.errors.len(), 1);
+        assert!(file.errors[0].message.contains("exactly one selector"));
+    }
+
+    #[test]
+    fn precedence_project_over_user_for_rule_lookup() {
+        let rule = RuleId::parse("core.git:reset-hard").unwrap();
+
+        let project_toml = r#"
+            [[allow]]
+            rule = "core.git:reset-hard"
+            reason = "project reason"
+        "#;
+        let user_toml = r#"
+            [[allow]]
+            rule = "core.git:reset-hard"
+            reason = "user reason"
+        "#;
+
+        let project_file =
+            parse_allowlist_toml(AllowlistLayer::Project, Path::new("project"), project_toml);
+        let user_file = parse_allowlist_toml(AllowlistLayer::User, Path::new("user"), user_toml);
+
+        let allowlists = LayeredAllowlist {
+            layers: vec![
+                LoadedAllowlistLayer {
+                    layer: AllowlistLayer::Project,
+                    path: PathBuf::from("project"),
+                    file: project_file,
+                },
+                LoadedAllowlistLayer {
+                    layer: AllowlistLayer::User,
+                    path: PathBuf::from("user"),
+                    file: user_file,
+                },
+            ],
+        };
+
+        let (entry, layer) = allowlists.lookup_rule(&rule).expect("must find rule");
+        assert_eq!(layer, AllowlistLayer::Project);
+        assert_eq!(entry.reason, "project reason");
+    }
+}

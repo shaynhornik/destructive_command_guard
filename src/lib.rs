@@ -51,6 +51,7 @@
 //! }
 //! ```
 
+pub mod allowlist;
 pub mod cli;
 pub mod config;
 pub mod context;
@@ -60,6 +61,10 @@ pub mod hook;
 pub mod packs;
 
 // Re-export commonly used types
+pub use allowlist::{
+    AllowEntry, AllowSelector, AllowlistError, AllowlistFile, AllowlistLayer, LayeredAllowlist,
+    LoadedAllowlistLayer, RuleId, load_default_allowlists,
+};
 pub use config::Config;
 pub use evaluator::{
     EvaluationDecision, EvaluationResult, LegacyDestructivePattern, LegacySafePattern, MatchSource,
