@@ -6,7 +6,7 @@
 use clap::{Parser, Subcommand};
 
 use crate::config::Config;
-use crate::evaluator::{evaluate_command, EvaluationDecision, MatchSource};
+use crate::evaluator::{EvaluationDecision, MatchSource, evaluate_command};
 use crate::packs::REGISTRY;
 
 /// High-performance Claude Code hook for blocking destructive commands.

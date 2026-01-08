@@ -157,7 +157,9 @@ impl CommandSpans {
 
     /// Get only spans that require pattern checking.
     pub fn executable_spans(&self) -> impl Iterator<Item = &Span> {
-        self.spans.iter().filter(|s| s.kind.requires_pattern_check())
+        self.spans
+            .iter()
+            .filter(|s| s.kind.requires_pattern_check())
     }
 
     /// Get only data spans (safe to skip).
@@ -180,9 +182,7 @@ impl CommandSpans {
     /// Extract the text content for all executable spans.
     #[must_use]
     pub fn executable_text<'a>(&self, command: &'a str) -> Vec<&'a str> {
-        self.executable_spans()
-            .map(|s| s.text(command))
-            .collect()
+        self.executable_spans().map(|s| s.text(command)).collect()
     }
 }
 
@@ -233,13 +233,13 @@ impl ContextClassifier {
     pub const fn new() -> Self {
         Self {
             inline_code_commands: &[
-                "bash", "sh", "zsh", "ksh", "dash",  // shells with -c
-                "python", "python3", "python2",      // python with -c
-                "node", "nodejs",                    // node with -e
-                "ruby",                              // ruby with -e
-                "perl",                              // perl with -e
-                "php",                               // php with -r
-                "lua",                               // lua with -e
+                "bash", "sh", "zsh", "ksh", "dash", // shells with -c
+                "python", "python3", "python2", // python with -c
+                "node", "nodejs", // node with -e
+                "ruby",   // ruby with -e
+                "perl",   // perl with -e
+                "php",    // php with -r
+                "lua",    // lua with -e
             ],
         }
     }
@@ -249,6 +249,7 @@ impl ContextClassifier {
     /// Returns a `CommandSpans` structure containing classified spans.
     /// Each byte in the command will belong to exactly one span.
     #[must_use]
+    #[allow(clippy::too_many_lines)] // State machine logic is cohesive and clearer as single function
     pub fn classify(&self, command: &str) -> CommandSpans {
         let bytes = command.as_bytes();
         let len = bytes.len();
@@ -356,7 +357,8 @@ impl ContextClassifier {
                                 // Check for inline code flags
                                 if word == "-c" || word == "-e" || word == "-r" {
                                     // Check if previous word was an inline-code command
-                                    pending_inline_code = self.check_inline_code_context(command, last_word_start);
+                                    pending_inline_code =
+                                        self.check_inline_code_context(command, last_word_start);
                                 }
                             }
                             last_word_start = i + 1;
@@ -462,7 +464,9 @@ impl ContextClassifier {
                         current_kind
                     }
                 }
-                TokenizerState::CommandSubst { .. } | TokenizerState::Backtick => SpanKind::InlineCode,
+                TokenizerState::CommandSubst { .. } | TokenizerState::Backtick => {
+                    SpanKind::InlineCode
+                }
             };
             spans.push(Span::new(final_kind, span_start, len));
         }
@@ -480,7 +484,9 @@ impl ContextClassifier {
         }
 
         // Get the last word
-        let word_start = trimmed.rfind(|c: char| c.is_whitespace()).map_or(0, |i| i + 1);
+        let word_start = trimmed
+            .rfind(|c: char| c.is_whitespace())
+            .map_or(0, |i| i + 1);
         let word = &trimmed[word_start..];
 
         // Check if it's an inline-code command (or ends with one after a path)
@@ -551,7 +557,10 @@ mod tests {
         let spans = classify_command(cmd);
 
         // Should have InlineCode span for $(rm -rf /)
-        let inline_span = spans.spans().iter().find(|s| s.kind == SpanKind::InlineCode);
+        let inline_span = spans
+            .spans()
+            .iter()
+            .find(|s| s.kind == SpanKind::InlineCode);
         assert!(inline_span.is_some());
         assert_eq!(inline_span.unwrap().text(cmd), "$(rm -rf /)");
     }
@@ -562,7 +571,10 @@ mod tests {
         let spans = classify_command(cmd);
 
         // Should have InlineCode span for `rm -rf /`
-        let inline_span = spans.spans().iter().find(|s| s.kind == SpanKind::InlineCode);
+        let inline_span = spans
+            .spans()
+            .iter()
+            .find(|s| s.kind == SpanKind::InlineCode);
         assert!(inline_span.is_some());
         assert_eq!(inline_span.unwrap().text(cmd), "`rm -rf /`");
     }
@@ -606,8 +618,14 @@ mod tests {
         let spans = classify_command(cmd);
 
         // The quoted part after -c should be InlineCode
-        let inline_span = spans.spans().iter().find(|s| s.kind == SpanKind::InlineCode);
-        assert!(inline_span.is_some(), "Should detect inline code after bash -c");
+        let inline_span = spans
+            .spans()
+            .iter()
+            .find(|s| s.kind == SpanKind::InlineCode);
+        assert!(
+            inline_span.is_some(),
+            "Should detect inline code after bash -c"
+        );
     }
 
     #[test]
@@ -616,8 +634,14 @@ mod tests {
         let spans = classify_command(cmd);
 
         // The quoted part after -c should be InlineCode
-        let inline_span = spans.spans().iter().find(|s| s.kind == SpanKind::InlineCode);
-        assert!(inline_span.is_some(), "Should detect inline code after python -c");
+        let inline_span = spans
+            .spans()
+            .iter()
+            .find(|s| s.kind == SpanKind::InlineCode);
+        assert!(
+            inline_span.is_some(),
+            "Should detect inline code after python -c"
+        );
     }
 
     #[test]
@@ -626,8 +650,14 @@ mod tests {
         let spans = classify_command(cmd);
 
         // The quoted part after -e should be InlineCode
-        let inline_span = spans.spans().iter().find(|s| s.kind == SpanKind::InlineCode);
-        assert!(inline_span.is_some(), "Should detect inline code after node -e");
+        let inline_span = spans
+            .spans()
+            .iter()
+            .find(|s| s.kind == SpanKind::InlineCode);
+        assert!(
+            inline_span.is_some(),
+            "Should detect inline code after node -e"
+        );
     }
 
     #[test]
@@ -662,7 +692,10 @@ mod tests {
         let spans = classify_command(cmd);
 
         // The quoted description should be Argument (not requiring pattern check)
-        let desc_span = spans.spans().iter().find(|s| s.text(cmd).contains("rm -rf"));
+        let desc_span = spans
+            .spans()
+            .iter()
+            .find(|s| s.text(cmd).contains("rm -rf"));
         if let Some(span) = desc_span {
             assert!(
                 !span.kind.requires_pattern_check() || span.kind == SpanKind::Argument,
@@ -678,7 +711,10 @@ mod tests {
         let spans = classify_command(cmd);
 
         // The quoted message should be Argument
-        let msg_span = spans.spans().iter().find(|s| s.text(cmd).contains("reset --hard"));
+        let msg_span = spans
+            .spans()
+            .iter()
+            .find(|s| s.text(cmd).contains("reset --hard"));
         if let Some(span) = msg_span {
             assert!(
                 span.kind == SpanKind::Argument || span.kind == SpanKind::Data,
@@ -736,7 +772,10 @@ mod tests {
         let spans = classify_command(cmd);
 
         // Should detect the outer command substitution as InlineCode
-        let inline_span = spans.spans().iter().find(|s| s.kind == SpanKind::InlineCode);
+        let inline_span = spans
+            .spans()
+            .iter()
+            .find(|s| s.kind == SpanKind::InlineCode);
         assert!(inline_span.is_some());
     }
 
@@ -757,8 +796,16 @@ mod tests {
         let spans = classify_command(cmd);
 
         // Should have at least 3 distinct spans
-        let data_count = spans.spans().iter().filter(|s| s.kind == SpanKind::Data).count();
-        let arg_count = spans.spans().iter().filter(|s| s.kind == SpanKind::Argument).count();
+        let data_count = spans
+            .spans()
+            .iter()
+            .filter(|s| s.kind == SpanKind::Data)
+            .count();
+        let arg_count = spans
+            .spans()
+            .iter()
+            .filter(|s| s.kind == SpanKind::Argument)
+            .count();
 
         assert!(data_count >= 1, "Should have single-quoted Data span");
         assert!(arg_count >= 1, "Should have double-quoted Argument span");
@@ -779,7 +826,13 @@ mod tests {
         let spans = classify_command(cmd);
 
         // Should still detect inline code after path-prefixed bash
-        let inline_span = spans.spans().iter().find(|s| s.kind == SpanKind::InlineCode);
-        assert!(inline_span.is_some(), "Should detect inline code after /usr/bin/bash -c");
+        let inline_span = spans
+            .spans()
+            .iter()
+            .find(|s| s.kind == SpanKind::InlineCode);
+        assert!(
+            inline_span.is_some(),
+            "Should detect inline code after /usr/bin/bash -c"
+        );
     }
 }

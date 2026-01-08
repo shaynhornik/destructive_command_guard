@@ -67,4 +67,4 @@ pub use hook::{HookInput, HookOutput, HookResult, HookSpecificOutput};
 pub use packs::{Pack, PackId, PackRegistry};
 
 // Re-export context types
-pub use context::{classify_command, CommandSpans, ContextClassifier, Span, SpanKind};
+pub use context::{CommandSpans, ContextClassifier, Span, SpanKind, classify_command};
