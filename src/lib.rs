@@ -76,7 +76,7 @@ pub use allowlist::{
 pub use config::Config;
 pub use evaluator::{
     EvaluationDecision, EvaluationResult, LegacyDestructivePattern, LegacySafePattern, MatchSource,
-    PatternMatch, evaluate_command, evaluate_command_with_legacy,
+    PatternMatch, evaluate_command, evaluate_command_with_legacy, evaluate_command_with_pack_order,
 };
 pub use hook::{HookInput, HookOutput, HookResult, HookSpecificOutput};
 pub use packs::{Pack, PackId, PackRegistry};

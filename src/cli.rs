@@ -6,7 +6,7 @@
 use clap::{Parser, Subcommand};
 
 use crate::config::Config;
-use crate::evaluator::{EvaluationDecision, MatchSource, evaluate_command};
+use crate::evaluator::{EvaluationDecision, MatchSource, evaluate_command_with_pack_order};
 use crate::load_default_allowlists;
 use crate::packs::REGISTRY;
 
@@ -255,6 +255,7 @@ fn test_command(config: &Config, command: &str, extra_packs: Option<Vec<String>>
     // Get enabled packs and collect keywords for quick rejection
     let enabled_packs = effective_config.enabled_pack_ids();
     let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
+    let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
 
     // Compile overrides once (not per-command)
     let compiled_overrides = effective_config.overrides.compile();
@@ -264,10 +265,10 @@ fn test_command(config: &Config, command: &str, extra_packs: Option<Vec<String>>
     let allowlists = load_default_allowlists();
 
     // Use shared evaluator for consistent behavior with hook mode
-    let result = evaluate_command(
+    let result = evaluate_command_with_pack_order(
         command,
-        &effective_config,
         &enabled_keywords,
+        &ordered_packs,
         &compiled_overrides,
         &allowlists,
     );
@@ -471,6 +472,90 @@ fn is_dcg_hook_entry(entry: &serde_json::Value) -> bool {
             })
 }
 
+/// Install the dcg hook entry into an in-memory Claude settings JSON value.
+///
+/// Returns `Ok(true)` when a new hook entry was added, `Ok(false)` when an
+/// existing hook was detected and `force == false`.
+///
+/// # Errors
+///
+/// Returns an error if the settings JSON is not in the expected format:
+/// - root must be an object
+/// - `hooks` must be an object (if present)
+/// - `hooks.PreToolUse` must be an array (if present)
+fn install_dcg_hook_into_settings(
+    settings: &mut serde_json::Value,
+    force: bool,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    // Build the hook configuration.
+    let hook_config = serde_json::json!({
+        "matcher": "Bash",
+        "hooks": [{
+            "type": "command",
+            "command": "dcg"
+        }]
+    });
+
+    let settings_obj = settings
+        .as_object_mut()
+        .ok_or("Invalid settings format (expected JSON object)")?;
+
+    let hooks_value = settings_obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
+
+    let hooks_obj = hooks_value
+        .as_object_mut()
+        .ok_or("Invalid hooks format (expected JSON object)")?;
+
+    let pre_tool_use_value = hooks_obj
+        .entry("PreToolUse")
+        .or_insert_with(|| serde_json::json!([]));
+
+    let pre_tool_use = pre_tool_use_value
+        .as_array_mut()
+        .ok_or("Invalid PreToolUse hooks format (expected JSON array)")?;
+
+    let already_installed = pre_tool_use.iter().any(is_dcg_hook_entry);
+    if already_installed && !force {
+        return Ok(false);
+    }
+
+    if force {
+        pre_tool_use.retain(|h| !is_dcg_hook_entry(h));
+    }
+
+    pre_tool_use.push(hook_config);
+    Ok(true)
+}
+
+/// Remove the dcg hook entry from an in-memory Claude settings JSON value.
+///
+/// Returns `Ok(true)` when at least one entry was removed, `Ok(false)` when no
+/// dcg hook entry existed.
+///
+/// # Errors
+///
+/// Returns an error if `hooks.PreToolUse` exists but is not an array.
+fn uninstall_dcg_hook_from_settings(
+    settings: &mut serde_json::Value,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let Some(hooks) = settings.get_mut("hooks") else {
+        return Ok(false);
+    };
+    let Some(pre_tool_use) = hooks.get_mut("PreToolUse") else {
+        return Ok(false);
+    };
+
+    let Some(arr) = pre_tool_use.as_array_mut() else {
+        return Err("Invalid PreToolUse hooks format (expected JSON array)".into());
+    };
+
+    let before = arr.len();
+    arr.retain(|h| !is_dcg_hook_entry(h));
+    Ok(arr.len() < before)
+}
+
 /// Install the hook into Claude Code settings
 fn install_hook(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     use colored::Colorize;
@@ -489,51 +574,11 @@ fn install_hook(force: bool) -> Result<(), Box<dyn std::error::Error>> {
         serde_json::json!({})
     };
 
-    // Check if hook already exists
-    let hook_exists = settings
-        .get("hooks")
-        .and_then(|h| h.get("PreToolUse"))
-        .and_then(|arr| arr.as_array())
-        .is_some_and(|a| a.iter().any(is_dcg_hook_entry));
-
-    if hook_exists && !force {
+    let changed = install_dcg_hook_into_settings(&mut settings, force)?;
+    if !changed {
         println!("{}", "Hook already installed!".yellow());
         println!("Use --force to reinstall");
         return Ok(());
-    }
-
-    // Build the hook configuration
-    let hook_config = serde_json::json!({
-        "matcher": "Bash",
-        "hooks": [{
-            "type": "command",
-            "command": "dcg"
-        }]
-    });
-
-    // Add or update the hook
-    let hooks = settings
-        .as_object_mut()
-        .ok_or("Invalid settings format")?
-        .entry("hooks")
-        .or_insert(serde_json::json!({}));
-
-    let pre_tool_use = hooks
-        .as_object_mut()
-        .ok_or("Invalid hooks format")?
-        .entry("PreToolUse")
-        .or_insert(serde_json::json!([]));
-
-    // Remove existing dcg hooks if force
-    if force {
-        if let Some(arr) = pre_tool_use.as_array_mut() {
-            arr.retain(|h| !is_dcg_hook_entry(h));
-        }
-    }
-
-    // Add the new hook
-    if let Some(arr) = pre_tool_use.as_array_mut() {
-        arr.push(hook_config);
     }
 
     // Write back
@@ -566,17 +611,8 @@ fn uninstall_hook(purge: bool) -> Result<(), Box<dyn std::error::Error>> {
     let content = std::fs::read_to_string(&settings_path)?;
     let mut settings: serde_json::Value = serde_json::from_str(&content)?;
 
-    // Remove dcg hooks
-    let mut removed = false;
-    if let Some(hooks) = settings.get_mut("hooks") {
-        if let Some(pre_tool_use) = hooks.get_mut("PreToolUse") {
-            if let Some(arr) = pre_tool_use.as_array_mut() {
-                let before = arr.len();
-                arr.retain(|h| !is_dcg_hook_entry(h));
-                removed = arr.len() < before;
-            }
-        }
-    }
+    // Remove dcg hooks (fail if settings structure is unexpected).
+    let removed = uninstall_dcg_hook_from_settings(&mut settings)?;
 
     if removed {
         // Write back
@@ -657,6 +693,115 @@ fn check_hook_registered() -> Result<bool, Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_dcg_entry() -> serde_json::Value {
+        serde_json::json!({
+            "matcher": "Bash",
+            "hooks": [{
+                "type": "command",
+                "command": "dcg"
+            }]
+        })
+    }
+
+    fn entry_has_hook_command(entry: &serde_json::Value, command: &str) -> bool {
+        entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .is_some_and(|hooks| {
+                hooks.iter().any(|hook| {
+                    hook.get("command")
+                        .and_then(|c| c.as_str())
+                        .is_some_and(|c| c == command)
+                })
+            })
+    }
+
+    #[test]
+    fn install_into_settings_creates_structure() {
+        let mut settings = serde_json::json!({});
+        let changed = install_dcg_hook_into_settings(&mut settings, false).expect("install ok");
+        assert!(changed);
+
+        let pre = settings
+            .get("hooks")
+            .and_then(|h| h.get("PreToolUse"))
+            .and_then(|arr| arr.as_array())
+            .expect("PreToolUse array exists");
+        assert_eq!(pre.len(), 1);
+        assert!(is_dcg_hook_entry(&pre[0]));
+    }
+
+    #[test]
+    fn install_into_settings_does_not_duplicate_without_force() {
+        let mut settings = serde_json::json!({
+            "hooks": { "PreToolUse": [ make_dcg_entry() ] }
+        });
+
+        let changed = install_dcg_hook_into_settings(&mut settings, false).expect("install ok");
+        assert!(!changed, "should detect existing hook");
+
+        let pre = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.iter().filter(|e| is_dcg_hook_entry(e)).count(), 1);
+    }
+
+    #[test]
+    fn install_into_settings_force_reinstalls_single_entry() {
+        let other = serde_json::json!({
+            "matcher": "Bash",
+            "hooks": [{ "type": "command", "command": "other-hook" }]
+        });
+        let mut settings = serde_json::json!({
+            "hooks": { "PreToolUse": [ make_dcg_entry(), other ] }
+        });
+
+        let changed = install_dcg_hook_into_settings(&mut settings, true).expect("install ok");
+        assert!(changed);
+
+        let pre = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.iter().filter(|e| is_dcg_hook_entry(e)).count(), 1);
+        assert!(
+            pre.iter().any(|e| entry_has_hook_command(e, "other-hook")),
+            "should retain other hook entry"
+        );
+    }
+
+    #[test]
+    fn install_into_settings_errors_on_invalid_pre_tool_use_type() {
+        let mut settings = serde_json::json!({
+            "hooks": { "PreToolUse": { "not": "an array" } }
+        });
+        let err = install_dcg_hook_into_settings(&mut settings, false).expect_err("should error");
+        assert!(err.to_string().contains("PreToolUse"));
+    }
+
+    #[test]
+    fn uninstall_from_settings_removes_dcg_entries() {
+        let other = serde_json::json!({
+            "matcher": "Bash",
+            "hooks": [{ "type": "command", "command": "other-hook" }]
+        });
+        let mut settings = serde_json::json!({
+            "hooks": { "PreToolUse": [ make_dcg_entry(), other ] }
+        });
+
+        let removed = uninstall_dcg_hook_from_settings(&mut settings).expect("uninstall ok");
+        assert!(removed);
+
+        let pre = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.iter().filter(|e| is_dcg_hook_entry(e)).count(), 0);
+        assert_eq!(pre.len(), 1, "should retain non-dcg hook");
+        assert!(entry_has_hook_command(&pre[0], "other-hook"));
+    }
+
+    #[test]
+    fn uninstall_from_settings_errors_on_invalid_pre_tool_use_type() {
+        let mut settings = serde_json::json!({
+            "hooks": { "PreToolUse": { "not": "an array" } }
+        });
+        let err = uninstall_dcg_hook_from_settings(&mut settings).expect_err("should error");
+        assert!(err.to_string().contains("PreToolUse"));
+    }
 
     #[test]
     fn test_cli_parse_no_args() {

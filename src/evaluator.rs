@@ -9,11 +9,11 @@
 //!
 //! 1. **Config allow overrides** - Check if command matches an explicit allow pattern
 //! 2. **Config block overrides** - Check if command matches an explicit block pattern
-//! 3. **Quick rejection** - Skip expensive regex if no relevant keywords present
-//! 4. **Command normalization** - Strip absolute paths from git/rm binaries
-//! 5. **Safe patterns** - Whitelist check (legacy patterns in main.rs)
-//! 6. **Destructive patterns** - Blacklist check (legacy patterns in main.rs)
-//! 7. **Pack registry** - Check against enabled packs
+//! 3. **Heredoc/inline scripts** - Extract + AST-scan embedded code (fail-open)
+//! 4. **Quick rejection** - Skip pack evaluation if no relevant keywords present
+//! 5. **Context sanitization** - Mask known-safe string arguments (reduce false positives)
+//! 6. **Command normalization** - Strip absolute paths from git/rm binaries
+//! 7. **Pack registry** - Check enabled packs (safe patterns first, then destructive)
 //!
 //! # Example
 //!
@@ -265,6 +265,38 @@ pub fn evaluate_command(
     compiled_overrides: &crate::config::CompiledOverrides,
     allowlists: &LayeredAllowlist,
 ) -> EvaluationResult {
+    let enabled_packs: HashSet<String> = config.enabled_pack_ids();
+    let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
+    evaluate_command_with_pack_order(
+        command,
+        enabled_keywords,
+        &ordered_packs,
+        compiled_overrides,
+        allowlists,
+    )
+}
+
+/// Evaluate a command using a precomputed pack order.
+///
+/// This is the hot-path optimized variant for hook mode: callers can compute the
+/// enabled pack set and expanded ordered pack list once at startup and reuse it
+/// for every command invocation.
+///
+/// # Arguments
+///
+/// * `command` - The raw command string to evaluate
+/// * `enabled_keywords` - Keywords from enabled packs for quick rejection
+/// * `ordered_packs` - Expanded pack IDs in deterministic evaluation order
+/// * `compiled_overrides` - Precompiled config overrides
+/// * `allowlists` - Layered allowlists (project/user/system)
+#[must_use]
+pub fn evaluate_command_with_pack_order(
+    command: &str,
+    enabled_keywords: &[&str],
+    ordered_packs: &[String],
+    compiled_overrides: &crate::config::CompiledOverrides,
+    allowlists: &LayeredAllowlist,
+) -> EvaluationResult {
     // Empty commands are allowed (no-op)
     if command.is_empty() {
         return EvaluationResult::allowed();
@@ -332,21 +364,16 @@ pub fn evaluate_command(
         return EvaluationResult::allowed();
     }
 
-    // Step 4: Normalize command (strip /usr/bin/git -> git, etc.)
+    // Step 5: Normalize command (strip /usr/bin/git -> git, etc.)
     let normalized = normalize_command(command_for_match);
 
-    // Step 5 & 6: Check legacy patterns (safe then destructive)
-    // Note: These are currently in main.rs as SAFE_PATTERNS and DESTRUCTIVE_PATTERNS.
-    // For now, we skip this step here since main.rs handles it.
-    // TODO: Move legacy patterns here once git_safety_guard-99e.3.4 is implemented.
-
-    // Step 7: Check enabled packs with allowlist override semantics.
+    // Step 6: Check enabled packs with allowlist override semantics.
     //
     // IMPORTANT: allowlisting must bypass only the specific matched rule, and must not
     // "disable other packs" by stopping evaluation early. If a command matches multiple
     // packs/patterns, allowlisting the first match should still allow later matches to
     // deny the command.
-    let result = evaluate_packs_with_allowlists(&normalized, config, allowlists);
+    let result = evaluate_packs_with_allowlists(&normalized, ordered_packs, allowlists);
     if result.allowlist_override.is_none() {
         if let Some((matched, layer, reason)) = heredoc_allowlist_hit {
             return EvaluationResult::allowed_by_allowlist(matched, layer, reason);
@@ -358,18 +385,15 @@ pub fn evaluate_command(
 
 fn evaluate_packs_with_allowlists(
     normalized: &str,
-    config: &Config,
+    ordered_packs: &[String],
     allowlists: &LayeredAllowlist,
 ) -> EvaluationResult {
-    let enabled_packs: HashSet<String> = config.enabled_pack_ids();
-    let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
-
     // If we allowlist a deny, we keep scanning for other denies. If none appear,
     // we return ALLOW + the first allowlist override metadata for explain/logging.
     let mut first_allowlist_hit: Option<(PatternMatch, AllowlistLayer, String)> = None;
 
     for pack_id in ordered_packs {
-        let Some(pack) = REGISTRY.get(&pack_id) else {
+        let Some(pack) = REGISTRY.get(pack_id) else {
             continue;
         };
 
@@ -397,7 +421,7 @@ fn evaluate_packs_with_allowlists(
 
             // Allowlist check: only applies when we have a stable match identity (named pattern).
             if let Some(pattern_name) = pattern.name {
-                if let Some(hit) = allowlists.match_rule(&pack_id, pattern_name) {
+                if let Some(hit) = allowlists.match_rule(pack_id, pattern_name) {
                     if first_allowlist_hit.is_none() {
                         first_allowlist_hit = Some((
                             PatternMatch {
@@ -415,10 +439,10 @@ fn evaluate_packs_with_allowlists(
                     continue;
                 }
 
-                return EvaluationResult::denied_by_pack_pattern(&pack_id, pattern_name, reason);
+                return EvaluationResult::denied_by_pack_pattern(pack_id, pattern_name, reason);
             }
 
-            return EvaluationResult::denied_by_pack(&pack_id, reason);
+            return EvaluationResult::denied_by_pack(pack_id, reason);
         }
     }
 
@@ -520,7 +544,7 @@ where
         return EvaluationResult::allowed();
     }
 
-    // Step 4: Normalize command (strip /usr/bin/git -> git, etc.)
+    // Step 5: Normalize command (strip /usr/bin/git -> git, etc.)
     let normalized = normalize_command(command_for_match);
 
     // Step 5: Check legacy safe patterns (whitelist)
@@ -538,7 +562,9 @@ where
     }
 
     // Step 7: Check enabled packs with allowlist override semantics.
-    let result = evaluate_packs_with_allowlists(&normalized, config, allowlists);
+    let enabled_packs: HashSet<String> = config.enabled_pack_ids();
+    let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
+    let result = evaluate_packs_with_allowlists(&normalized, &ordered_packs, allowlists);
     if result.allowlist_override.is_none() {
         if let Some((matched, layer, reason)) = heredoc_allowlist_hit {
             return EvaluationResult::allowed_by_allowlist(matched, layer, reason);

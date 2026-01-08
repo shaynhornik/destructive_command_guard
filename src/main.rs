@@ -20,7 +20,7 @@ use clap::Parser;
 use colored::Colorize;
 use destructive_command_guard::cli::{self, Cli};
 use destructive_command_guard::config::Config;
-use destructive_command_guard::evaluator::{EvaluationDecision, evaluate_command};
+use destructive_command_guard::evaluator::{EvaluationDecision, evaluate_command_with_pack_order};
 use destructive_command_guard::hook;
 use destructive_command_guard::load_default_allowlists;
 use destructive_command_guard::packs::REGISTRY;
@@ -450,6 +450,7 @@ fn main() {
     // This is done before stdin read to minimize latency on the critical path.
     let enabled_packs: HashSet<String> = config.enabled_pack_ids();
     let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
+    let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
 
     // Read stdin with a reasonable capacity hint for typical hook input.
     // Hook input is typically ~100-200 bytes of JSON.
@@ -489,10 +490,10 @@ fn main() {
     }
 
     // Use the shared evaluator for hook mode parity with `dcg test`.
-    let result = evaluate_command(
+    let result = evaluate_command_with_pack_order(
         &command,
-        &config,
         &enabled_keywords,
+        &ordered_packs,
         &compiled_overrides,
         &allowlists,
     );
