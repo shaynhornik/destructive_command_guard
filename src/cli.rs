@@ -3,7 +3,7 @@
 //! This module provides the command-line interface for dcg (`destructive_command_guard`),
 //! including subcommands for configuration management and pack information.
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 use crate::config::Config;
 use crate::evaluator::{EvaluationDecision, MatchSource, evaluate_command_with_pack_order};
@@ -181,68 +181,7 @@ pub enum Command {
     /// using the same pipeline as hook mode. Use `--fail-on` to control
     /// exit codes for CI integration.
     #[command(name = "scan")]
-    Scan {
-        // === File selection modes (mutually exclusive) ===
-        /// Scan files staged for commit (git index)
-        #[arg(long, conflicts_with_all = ["paths", "git_diff"])]
-        staged: bool,
-
-        /// Scan explicit file paths (directories are expanded recursively)
-        #[arg(long, conflicts_with_all = ["staged", "git_diff"], num_args = 1..)]
-        paths: Option<Vec<std::path::PathBuf>>,
-
-        /// Scan files changed in a git diff range (e.g., "HEAD~3..HEAD", "main..feature")
-        #[arg(long = "git-diff", value_name = "REV_RANGE", conflicts_with_all = ["staged", "paths"])]
-        git_diff: Option<String>,
-
-        // === Output / policy flags ===
-        /// Output format
-        #[arg(long, short = 'f', value_enum, default_value = "pretty")]
-        format: crate::scan::ScanFormat,
-
-        /// Exit non-zero when findings meet this threshold
-        #[arg(long, value_enum, default_value = "error")]
-        fail_on: crate::scan::ScanFailOn,
-
-        // === Safety / performance knobs ===
-        /// Maximum file size to scan (bytes); larger files are skipped
-        #[arg(
-            long = "max-file-size",
-            value_name = "BYTES",
-            default_value = "1048576"
-        )]
-        max_file_size: u64,
-
-        /// Maximum number of findings to report (stop scanning after limit)
-        #[arg(long = "max-findings", value_name = "N", default_value = "100")]
-        max_findings: usize,
-
-        /// Exclude files matching glob pattern (repeatable)
-        #[arg(long, value_name = "GLOB")]
-        exclude: Vec<String>,
-
-        /// Include only files matching glob pattern (repeatable)
-        #[arg(long, value_name = "GLOB")]
-        include: Vec<String>,
-
-        // === Redaction / truncation ===
-        /// Redact sensitive content in output
-        #[arg(long, value_enum, default_value = "none")]
-        redact: crate::scan::ScanRedactMode,
-
-        /// Truncate long commands in output (chars; 0 = no truncation)
-        #[arg(long, value_name = "N", default_value = "200")]
-        truncate: usize,
-
-        // === UX flags ===
-        /// Include verbose output (skipped-file reasons, extractor stats)
-        #[arg(long, short = 'v')]
-        verbose: bool,
-
-        /// Limit exemplars shown in pretty output
-        #[arg(long, value_name = "N", default_value = "10")]
-        top: usize,
-    },
+    Scan(ScanCommand),
 
     /// Explain why a command would be blocked or allowed (decision trace)
     ///
@@ -261,6 +200,92 @@ pub enum Command {
         #[arg(long, value_delimiter = ',')]
         with_packs: Option<Vec<String>>,
     },
+}
+
+/// `dcg scan` command arguments and actions.
+#[derive(Args, Debug)]
+#[command(args_conflicts_with_subcommands = true)]
+pub struct ScanCommand {
+    // === File selection modes (mutually exclusive) ===
+    /// Scan files staged for commit (git index)
+    #[arg(long, conflicts_with_all = ["paths", "git_diff"])]
+    staged: bool,
+
+    /// Scan explicit file paths (directories are expanded recursively)
+    #[arg(long, conflicts_with_all = ["staged", "git_diff"], num_args = 1..)]
+    paths: Option<Vec<std::path::PathBuf>>,
+
+    /// Scan files changed in a git diff range (e.g., "HEAD~3..HEAD", "main..feature")
+    #[arg(
+        long = "git-diff",
+        value_name = "REV_RANGE",
+        conflicts_with_all = ["staged", "paths"]
+    )]
+    git_diff: Option<String>,
+
+    // === Output / policy flags ===
+    /// Output format
+    #[arg(long, short = 'f', value_enum, default_value = "pretty")]
+    format: crate::scan::ScanFormat,
+
+    /// Exit non-zero when findings meet this threshold
+    #[arg(long, value_enum, default_value = "error")]
+    fail_on: crate::scan::ScanFailOn,
+
+    // === Safety / performance knobs ===
+    /// Maximum file size to scan (bytes); larger files are skipped
+    #[arg(
+        long = "max-file-size",
+        value_name = "BYTES",
+        default_value = "1048576"
+    )]
+    max_file_size: u64,
+
+    /// Maximum number of findings to report (stop scanning after limit)
+    #[arg(long = "max-findings", value_name = "N", default_value = "100")]
+    max_findings: usize,
+
+    /// Exclude files matching glob pattern (repeatable)
+    #[arg(long, value_name = "GLOB")]
+    exclude: Vec<String>,
+
+    /// Include only files matching glob pattern (repeatable)
+    #[arg(long, value_name = "GLOB")]
+    include: Vec<String>,
+
+    // === Redaction / truncation ===
+    /// Redact sensitive content in output
+    #[arg(long, value_enum, default_value = "none")]
+    redact: crate::scan::ScanRedactMode,
+
+    /// Truncate long commands in output (chars; 0 = no truncation)
+    #[arg(long, value_name = "N", default_value = "200")]
+    truncate: usize,
+
+    // === UX flags ===
+    /// Include verbose output (skipped-file reasons, extractor stats)
+    #[arg(long, short = 'v')]
+    verbose: bool,
+
+    /// Limit exemplars shown in pretty output
+    #[arg(long, value_name = "N", default_value = "10")]
+    top: usize,
+
+    /// Optional action subcommand (pre-commit integration helpers)
+    #[command(subcommand)]
+    action: Option<ScanAction>,
+}
+
+/// `dcg scan` subcommands.
+#[derive(Subcommand, Debug)]
+pub enum ScanAction {
+    /// Install a `.git/hooks/pre-commit` hook that runs `dcg scan --staged`.
+    #[command(name = "install-pre-commit")]
+    InstallPreCommit,
+
+    /// Uninstall the `.git/hooks/pre-commit` hook installed by dcg.
+    #[command(name = "uninstall-pre-commit")]
+    UninstallPreCommit,
 }
 
 /// Output format for explain command.
@@ -465,37 +490,8 @@ pub fn run_command(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let layer = resolve_layer(project, user);
             allowlist_remove(&rule_id, layer)?;
         }
-        Some(Command::Scan {
-            staged,
-            paths,
-            git_diff,
-            format,
-            fail_on,
-            max_file_size,
-            max_findings,
-            exclude,
-            include,
-            redact,
-            truncate,
-            verbose,
-            top,
-        }) => {
-            handle_scan(
-                &config,
-                staged,
-                paths,
-                git_diff,
-                format,
-                fail_on,
-                max_file_size,
-                max_findings,
-                &exclude,
-                &include,
-                redact,
-                truncate,
-                verbose,
-                top,
-            )?;
+        Some(Command::Scan(scan)) => {
+            handle_scan_command(&config, scan)?;
         }
         Some(Command::Explain {
             command,
@@ -780,10 +776,212 @@ fn show_config(config: &Config) {
     }
 }
 
+const DCG_SCAN_PRE_COMMIT_SENTINEL: &str = "# dcg:scan-pre-commit";
+
+fn build_scan_pre_commit_hook_script() -> String {
+    format!(
+        r#"#!/usr/bin/env bash
+{DCG_SCAN_PRE_COMMIT_SENTINEL}
+# Generated by: dcg scan install-pre-commit
+#
+# This hook runs `dcg scan --staged` to block commits that introduce destructive
+# commands in executable contexts (CI workflows, scripts, etc.).
+#
+# Bypass once (unsafe): git commit --no-verify
+
+set -u
+
+if ! command -v dcg >/dev/null 2>&1; then
+  echo "dcg pre-commit hook: 'dcg' not found in PATH; skipping scan." >&2
+  echo "Fix: install dcg or remove this hook via: dcg scan uninstall-pre-commit" >&2
+  exit 0
+fi
+
+dcg scan --staged
+status=$?
+if [ "$status" -ne 0 ]; then
+  echo >&2
+  echo "dcg scan blocked this commit." >&2
+  echo "Fix findings (preferred), or allowlist false positives:" >&2
+  echo "  dcg allowlist add-command \"<command>\" -r \"<reason>\" --project" >&2
+  echo "Bypass once (unsafe): git commit --no-verify" >&2
+  exit "$status"
+fi
+"#
+    )
+}
+
+fn git_resolve_path(
+    cwd: &std::path::Path,
+    git_path: &str,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    ensure_git_repo(cwd)?;
+
+    let output = std::process::Command::new("git")
+        .current_dir(cwd)
+        .args(["rev-parse", "--git-path", git_path])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git rev-parse --git-path {git_path} failed: {stderr}").into());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let path_str = stdout.trim();
+    if path_str.is_empty() {
+        return Err(format!("git rev-parse --git-path {git_path} returned empty output").into());
+    }
+
+    let path = std::path::PathBuf::from(path_str);
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    })
+}
+
+fn hook_looks_like_dcg_scan_pre_commit(hook_bytes: &[u8]) -> bool {
+    String::from_utf8_lossy(hook_bytes).contains(DCG_SCAN_PRE_COMMIT_SENTINEL)
+}
+
+fn install_scan_pre_commit_hook() -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    let hook_path = install_scan_pre_commit_hook_at(&cwd)?;
+    eprintln!("Installed pre-commit hook: {}", hook_path.display());
+    Ok(())
+}
+
+fn install_scan_pre_commit_hook_at(
+    cwd: &std::path::Path,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let hook_path = git_resolve_path(cwd, "hooks/pre-commit")?;
+
+    if hook_path.exists() {
+        let existing = std::fs::read(&hook_path)?;
+        if !hook_looks_like_dcg_scan_pre_commit(&existing) {
+            return Err(format!(
+                "Refusing to overwrite existing pre-commit hook at {}\n\n\
+This hook does not appear to have been installed by dcg.\n\n\
+Manual integration options:\n\
+  1) Add a line to your existing hook to run: dcg scan --staged\n\
+  2) Configure your hook manager to run: dcg scan --staged\n\n\
+To replace your hook with a dcg-managed hook, delete it manually and re-run:\n\
+  dcg scan install-pre-commit",
+                hook_path.display()
+            )
+            .into());
+        }
+    } else if let Some(parent) = hook_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    std::fs::write(&hook_path, build_scan_pre_commit_hook_script())?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut perms = std::fs::metadata(&hook_path)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&hook_path, perms)?;
+    }
+
+    Ok(hook_path)
+}
+
+fn uninstall_scan_pre_commit_hook() -> Result<(), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    let removed = uninstall_scan_pre_commit_hook_at(&cwd)?;
+    if let Some(path) = removed {
+        eprintln!("Removed pre-commit hook: {}", path.display());
+    } else {
+        eprintln!("No dcg pre-commit hook found (nothing to remove).");
+    }
+    Ok(())
+}
+
+fn uninstall_scan_pre_commit_hook_at(
+    cwd: &std::path::Path,
+) -> Result<Option<std::path::PathBuf>, Box<dyn std::error::Error>> {
+    let hook_path = git_resolve_path(cwd, "hooks/pre-commit")?;
+
+    if !hook_path.exists() {
+        return Ok(None);
+    }
+
+    let existing = std::fs::read(&hook_path)?;
+    if !hook_looks_like_dcg_scan_pre_commit(&existing) {
+        return Err(format!(
+            "Refusing to remove existing pre-commit hook at {}\n\n\
+This hook does not appear to have been installed by dcg.\n\n\
+If you want to remove it, delete it manually.\n\
+If you want to keep it, you can still add dcg scanning by adding this line:\n\
+  dcg scan --staged",
+            hook_path.display()
+        )
+        .into());
+    }
+
+    std::fs::remove_file(&hook_path)?;
+    Ok(Some(hook_path))
+}
+
 /// Handle the `dcg scan` subcommand.
 ///
 /// Validates file selection mode, builds scan options, and delegates to
 /// the scan module for execution.
+fn handle_scan_command(
+    config: &Config,
+    scan: ScanCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ScanCommand {
+        staged,
+        paths,
+        git_diff,
+        format,
+        fail_on,
+        max_file_size,
+        max_findings,
+        exclude,
+        include,
+        redact,
+        truncate,
+        verbose,
+        top,
+        action,
+    } = scan;
+
+    match action {
+        Some(ScanAction::InstallPreCommit) => {
+            install_scan_pre_commit_hook()?;
+        }
+        Some(ScanAction::UninstallPreCommit) => {
+            uninstall_scan_pre_commit_hook()?;
+        }
+        None => {
+            handle_scan(
+                config,
+                staged,
+                paths,
+                git_diff,
+                format,
+                fail_on,
+                max_file_size,
+                max_findings,
+                &exclude,
+                &include,
+                redact,
+                truncate,
+                verbose,
+                top,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::needless_pass_by_value)] // Values consumed from CLI args
 fn handle_scan(
@@ -2679,16 +2877,11 @@ mod tests {
     #[test]
     fn test_cli_parse_scan_staged() {
         let cli = Cli::try_parse_from(["dcg", "scan", "--staged"]).expect("parse");
-        if let Some(Command::Scan {
-            staged,
-            paths,
-            git_diff,
-            ..
-        }) = cli.command
-        {
-            assert!(staged);
-            assert!(paths.is_none());
-            assert!(git_diff.is_none());
+        if let Some(Command::Scan(scan)) = cli.command {
+            assert!(scan.staged);
+            assert!(scan.paths.is_none());
+            assert!(scan.git_diff.is_none());
+            assert!(scan.action.is_none());
         } else {
             panic!("Expected Scan command");
         }
@@ -2698,22 +2891,17 @@ mod tests {
     fn test_cli_parse_scan_paths() {
         let cli = Cli::try_parse_from(["dcg", "scan", "--paths", "src/main.rs", "src/lib.rs"])
             .expect("parse");
-        if let Some(Command::Scan {
-            staged,
-            paths,
-            git_diff,
-            ..
-        }) = cli.command
-        {
-            assert!(!staged);
+        if let Some(Command::Scan(scan)) = cli.command {
+            assert!(!scan.staged);
             assert_eq!(
-                paths,
+                scan.paths,
                 Some(vec![
                     std::path::PathBuf::from("src/main.rs"),
                     std::path::PathBuf::from("src/lib.rs"),
                 ])
             );
-            assert!(git_diff.is_none());
+            assert!(scan.git_diff.is_none());
+            assert!(scan.action.is_none());
         } else {
             panic!("Expected Scan command");
         }
@@ -2722,16 +2910,11 @@ mod tests {
     #[test]
     fn test_cli_parse_scan_git_diff() {
         let cli = Cli::try_parse_from(["dcg", "scan", "--git-diff", "main..HEAD"]).expect("parse");
-        if let Some(Command::Scan {
-            staged,
-            paths,
-            git_diff,
-            ..
-        }) = cli.command
-        {
-            assert!(!staged);
-            assert!(paths.is_none());
-            assert_eq!(git_diff, Some("main..HEAD".to_string()));
+        if let Some(Command::Scan(scan)) = cli.command {
+            assert!(!scan.staged);
+            assert!(scan.paths.is_none());
+            assert_eq!(scan.git_diff, Some("main..HEAD".to_string()));
+            assert!(scan.action.is_none());
         } else {
             panic!("Expected Scan command");
         }
@@ -2741,8 +2924,8 @@ mod tests {
     fn test_cli_parse_scan_format_json() {
         let cli =
             Cli::try_parse_from(["dcg", "scan", "--staged", "--format", "json"]).expect("parse");
-        if let Some(Command::Scan { format, .. }) = cli.command {
-            assert_eq!(format, crate::scan::ScanFormat::Json);
+        if let Some(Command::Scan(scan)) = cli.command {
+            assert_eq!(scan.format, crate::scan::ScanFormat::Json);
         } else {
             panic!("Expected Scan command");
         }
@@ -2752,8 +2935,8 @@ mod tests {
     fn test_cli_parse_scan_fail_on() {
         let cli = Cli::try_parse_from(["dcg", "scan", "--staged", "--fail-on", "warning"])
             .expect("parse");
-        if let Some(Command::Scan { fail_on, .. }) = cli.command {
-            assert_eq!(fail_on, crate::scan::ScanFailOn::Warning);
+        if let Some(Command::Scan(scan)) = cli.command {
+            assert_eq!(scan.fail_on, crate::scan::ScanFailOn::Warning);
         } else {
             panic!("Expected Scan command");
         }
@@ -2763,8 +2946,8 @@ mod tests {
     fn test_cli_parse_scan_max_file_size() {
         let cli = Cli::try_parse_from(["dcg", "scan", "--staged", "--max-file-size", "2048"])
             .expect("parse");
-        if let Some(Command::Scan { max_file_size, .. }) = cli.command {
-            assert_eq!(max_file_size, 2048);
+        if let Some(Command::Scan(scan)) = cli.command {
+            assert_eq!(scan.max_file_size, 2048);
         } else {
             panic!("Expected Scan command");
         }
@@ -2784,12 +2967,9 @@ mod tests {
             "src/**",
         ])
         .expect("parse");
-        if let Some(Command::Scan {
-            exclude, include, ..
-        }) = cli.command
-        {
-            assert_eq!(exclude, vec!["*.log", "target/**"]);
-            assert_eq!(include, vec!["src/**"]);
+        if let Some(Command::Scan(scan)) = cli.command {
+            assert_eq!(scan.exclude, vec!["*.log", "target/**"]);
+            assert_eq!(scan.include, vec!["src/**"]);
         } else {
             panic!("Expected Scan command");
         }
@@ -2815,6 +2995,116 @@ mod tests {
             "main..HEAD",
         ]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cli_parse_scan_install_pre_commit() {
+        let cli = Cli::try_parse_from(["dcg", "scan", "install-pre-commit"]).expect("parse");
+        if let Some(Command::Scan(scan)) = cli.command {
+            assert!(matches!(scan.action, Some(ScanAction::InstallPreCommit)));
+        } else {
+            panic!("Expected Scan command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_scan_uninstall_pre_commit() {
+        let cli = Cli::try_parse_from(["dcg", "scan", "uninstall-pre-commit"]).expect("parse");
+        if let Some(Command::Scan(scan)) = cli.command {
+            assert!(matches!(scan.action, Some(ScanAction::UninstallPreCommit)));
+        } else {
+            panic!("Expected Scan command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_scan_subcommand_conflicts_with_args() {
+        let result = Cli::try_parse_from(["dcg", "scan", "--staged", "install-pre-commit"]);
+        assert!(
+            result.is_err(),
+            "args should conflict with scan subcommands"
+        );
+    }
+
+    // ========================================================================
+    // Pre-commit install/uninstall tests
+    // ========================================================================
+
+    fn init_temp_git_repo(dir: &std::path::Path) {
+        let output = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(["init", "-q"])
+            .output()
+            .expect("git init");
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn scan_pre_commit_install_uninstall_roundtrip() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        init_temp_git_repo(tmp.path());
+
+        let hook_path = install_scan_pre_commit_hook_at(tmp.path()).expect("install");
+        assert!(hook_path.exists(), "hook should exist after install");
+
+        let contents_1 = std::fs::read_to_string(&hook_path).expect("read hook");
+        assert!(
+            contents_1.contains(DCG_SCAN_PRE_COMMIT_SENTINEL),
+            "hook should contain sentinel"
+        );
+        assert!(
+            contents_1.contains("dcg scan --staged"),
+            "hook should run dcg scan --staged"
+        );
+
+        let hook_path_2 = install_scan_pre_commit_hook_at(tmp.path()).expect("install again");
+        assert_eq!(hook_path, hook_path_2);
+
+        let contents_2 = std::fs::read_to_string(&hook_path).expect("read hook");
+        assert_eq!(contents_1, contents_2, "install should be idempotent");
+
+        let removed = uninstall_scan_pre_commit_hook_at(tmp.path()).expect("uninstall");
+        assert_eq!(removed, Some(hook_path.clone()));
+        assert!(!hook_path.exists(), "hook should be removed");
+
+        let removed_again = uninstall_scan_pre_commit_hook_at(tmp.path()).expect("uninstall again");
+        assert!(removed_again.is_none(), "should be a no-op when missing");
+    }
+
+    #[test]
+    fn scan_pre_commit_install_refuses_to_overwrite_unknown_hook() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        init_temp_git_repo(tmp.path());
+
+        let hook_path = git_resolve_path(tmp.path(), "hooks/pre-commit").expect("hook path");
+        let existing = "#!/usr/bin/env bash\necho hi\n";
+        std::fs::write(&hook_path, existing).expect("write existing hook");
+
+        let err = install_scan_pre_commit_hook_at(tmp.path()).expect_err("should refuse");
+        assert!(err.to_string().contains("Refusing to overwrite"));
+
+        let after = std::fs::read_to_string(&hook_path).expect("read hook after");
+        assert_eq!(after, existing, "should not modify unknown hook");
+    }
+
+    #[test]
+    fn scan_pre_commit_uninstall_refuses_to_remove_unknown_hook() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        init_temp_git_repo(tmp.path());
+
+        let hook_path = git_resolve_path(tmp.path(), "hooks/pre-commit").expect("hook path");
+        let existing = "#!/usr/bin/env bash\necho hi\n";
+        std::fs::write(&hook_path, existing).expect("write existing hook");
+
+        let err = uninstall_scan_pre_commit_hook_at(tmp.path()).expect_err("should refuse");
+        assert!(err.to_string().contains("Refusing to remove"));
+
+        let after = std::fs::read_to_string(&hook_path).expect("read hook after");
+        assert_eq!(after, existing, "should not modify unknown hook");
     }
 
     #[test]
