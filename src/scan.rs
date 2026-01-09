@@ -1903,7 +1903,8 @@ fn extract_terraform_from_str(
 
         // Look for provisioner blocks
         if let Some(prov_type) = detect_provisioner_block(trimmed) {
-            let block_indent = raw_line.len() - trimmed.len();
+            // Calculate leading indent only (not affected by trailing whitespace)
+            let block_indent = raw_line.len() - raw_line.trim_start().len();
             idx += 1;
 
             // Parse the provisioner block
@@ -1914,7 +1915,7 @@ fn extract_terraform_from_str(
                         let inner_trimmed = inner_line.trim();
 
                         if inner_trimmed == "}" {
-                            let inner_indent = inner_line.len() - inner_trimmed.len();
+                            let inner_indent = inner_line.len() - inner_line.trim_start().len();
                             if inner_indent <= block_indent {
                                 break;
                             }
@@ -1978,7 +1979,7 @@ fn extract_terraform_from_str(
                         let inner_trimmed = inner_line.trim();
 
                         if inner_trimmed == "}" {
-                            let inner_indent = inner_line.len() - inner_trimmed.len();
+                            let inner_indent = inner_line.len() - inner_line.trim_start().len();
                             if inner_indent <= block_indent {
                                 break;
                             }
