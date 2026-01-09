@@ -20,6 +20,7 @@ pub mod infrastructure;
 pub mod kubernetes;
 pub mod package_managers;
 pub mod regex_engine;
+pub mod safe;
 pub mod strict_git;
 pub mod system;
 
@@ -424,6 +425,7 @@ impl PackRegistry {
         registry.register_pack(system::services::create_pack());
         registry.register_pack(strict_git::create_pack());
         registry.register_pack(package_managers::create_pack());
+        registry.register_pack(safe::cleanup::create_pack());
 
         registry
     }
@@ -529,9 +531,13 @@ impl PackRegistry {
     }
 
     /// Get the priority tier for a pack ID (lower = higher priority).
+    ///
+    /// Safe packs (tier 0) are evaluated first so their safe patterns can
+    /// whitelist commands before other packs' destructive patterns match.
     fn pack_tier(pack_id: &str) -> u8 {
         let category = pack_id.split('.').next().unwrap_or(pack_id);
         match category {
+            "safe" => 0,
             "core" => 1,
             "system" => 2,
             "infrastructure" => 3,
@@ -550,6 +556,16 @@ impl PackRegistry {
     /// Packs are evaluated in a deterministic order (see `expand_enabled_ordered`),
     /// ensuring consistent attribution when multiple packs could match.
     ///
+    /// # Evaluation order
+    ///
+    /// The evaluation uses a two-pass approach:
+    /// 1. **Safe patterns pass**: Check safe patterns across ALL enabled packs.
+    ///    If any pack's safe pattern matches, the command is allowed immediately.
+    ///    This allows "safe" packs (like `safe.cleanup`) to whitelist commands
+    ///    that would otherwise be blocked by other packs.
+    /// 2. **Destructive patterns pass**: Check destructive patterns across all packs.
+    ///    The first matching destructive pattern blocks (based on severity).
+    ///
     /// Returns a `CheckResult` containing:
     /// - `blocked`: whether the command should be blocked (based on severity)
     /// - `reason`: the human-readable explanation (if matched)
@@ -562,9 +578,32 @@ impl PackRegistry {
         // Expand category IDs to include all sub-packs in deterministic order
         let ordered_packs = self.expand_enabled_ordered(enabled_packs);
 
+        // Pass 1: Check safe patterns across ALL enabled packs first.
+        // If any pack's safe pattern matches, allow the command immediately.
+        // This enables "safe" packs to whitelist commands across pack boundaries.
         for pack_id in &ordered_packs {
             if let Some(pack) = self.packs.get(pack_id) {
-                if let Some(matched) = pack.check(cmd) {
+                // Quick reject: skip packs that don't have keyword matches
+                if !pack.might_match(cmd) {
+                    continue;
+                }
+                // Check safe patterns only
+                if pack.matches_safe(cmd) {
+                    return CheckResult::allowed();
+                }
+            }
+        }
+
+        // Pass 2: Check destructive patterns across all enabled packs.
+        // The first matching destructive pattern determines the result.
+        for pack_id in &ordered_packs {
+            if let Some(pack) = self.packs.get(pack_id) {
+                // Quick reject: skip packs that don't have keyword matches
+                if !pack.might_match(cmd) {
+                    continue;
+                }
+                // Check destructive patterns only
+                if let Some(matched) = pack.matches_destructive(cmd) {
                     return CheckResult::matched(
                         matched.reason,
                         pack_id,
@@ -1867,5 +1906,123 @@ mod tests {
                 );
             }
         }
+    }
+
+    // =========================================================================
+    // Safe cleanup pack cross-pack tests (git_safety_guard-t8x.4)
+    // =========================================================================
+
+    /// Test that safe.cleanup pack is at tier 0 (highest priority).
+    #[test]
+    fn safe_cleanup_tier_is_zero() {
+        assert_eq!(
+            PackRegistry::pack_tier("safe.cleanup"),
+            0,
+            "safe.cleanup should be tier 0 (highest priority)"
+        );
+    }
+
+    /// Test that safe.cleanup pack is registered in the registry.
+    #[test]
+    fn safe_cleanup_pack_exists() {
+        assert!(
+            REGISTRY.get("safe.cleanup").is_some(),
+            "safe.cleanup pack should be registered"
+        );
+    }
+
+    /// Test that safe.cleanup overrides core.filesystem blocking for build directories.
+    ///
+    /// This is the critical integration test for cross-pack safe pattern behavior.
+    /// When both safe.cleanup and core.filesystem are enabled, safe.cleanup's safe
+    /// patterns should be checked first (due to tier ordering), allowing commands
+    /// that would otherwise be blocked by core.filesystem.
+    #[test]
+    fn safe_cleanup_overrides_core_filesystem_for_build_dirs() {
+        // Without safe.cleanup, these commands would be blocked by core.filesystem
+        let mut enabled_without_cleanup = HashSet::new();
+        enabled_without_cleanup.insert("core.filesystem".to_string());
+
+        let cmd = "rm -rf target/";
+        let result = REGISTRY.check_command(cmd, &enabled_without_cleanup);
+        assert!(
+            result.blocked,
+            "rm -rf target/ should be blocked without safe.cleanup"
+        );
+
+        // With safe.cleanup enabled, the same command should be allowed
+        let mut enabled_with_cleanup = HashSet::new();
+        enabled_with_cleanup.insert("core.filesystem".to_string());
+        enabled_with_cleanup.insert("safe.cleanup".to_string());
+
+        let result = REGISTRY.check_command(cmd, &enabled_with_cleanup);
+        assert!(
+            !result.blocked,
+            "rm -rf target/ should be allowed when safe.cleanup is enabled"
+        );
+
+        // Test other common build directories
+        let build_dirs = ["rm -rf dist/", "rm -rf node_modules/", "rm -rf build/"];
+        for dir_cmd in build_dirs {
+            let result = REGISTRY.check_command(dir_cmd, &enabled_with_cleanup);
+            assert!(
+                !result.blocked,
+                "{dir_cmd} should be allowed when safe.cleanup is enabled"
+            );
+        }
+    }
+
+    /// Test that safe.cleanup does NOT allow path traversal even when enabled.
+    #[test]
+    fn safe_cleanup_still_blocks_path_traversal() {
+        let mut enabled = HashSet::new();
+        enabled.insert("core.filesystem".to_string());
+        enabled.insert("safe.cleanup".to_string());
+
+        // Path traversal should still be blocked
+        let traversal_cmd = "rm -rf ../target/";
+        let result = REGISTRY.check_command(traversal_cmd, &enabled);
+        assert!(
+            result.blocked,
+            "rm -rf ../target/ should still be blocked (path traversal)"
+        );
+
+        let embedded_traversal = "rm -rf foo/../target/";
+        let result = REGISTRY.check_command(embedded_traversal, &enabled);
+        assert!(
+            result.blocked,
+            "rm -rf foo/../target/ should still be blocked (embedded traversal)"
+        );
+    }
+
+    /// Test that safe.cleanup does NOT allow absolute paths even when enabled.
+    #[test]
+    fn safe_cleanup_still_blocks_absolute_paths() {
+        let mut enabled = HashSet::new();
+        enabled.insert("core.filesystem".to_string());
+        enabled.insert("safe.cleanup".to_string());
+
+        let absolute_cmd = "rm -rf /target/";
+        let result = REGISTRY.check_command(absolute_cmd, &enabled);
+        assert!(
+            result.blocked,
+            "rm -rf /target/ should still be blocked (absolute path)"
+        );
+    }
+
+    /// Test that safe.cleanup does NOT allow arbitrary directories.
+    #[test]
+    fn safe_cleanup_still_blocks_non_allowlisted_dirs() {
+        let mut enabled = HashSet::new();
+        enabled.insert("core.filesystem".to_string());
+        enabled.insert("safe.cleanup".to_string());
+
+        // src/ is NOT in the allowlist
+        let src_cmd = "rm -rf src/";
+        let result = REGISTRY.check_command(src_cmd, &enabled);
+        assert!(
+            result.blocked,
+            "rm -rf src/ should still be blocked (not in cleanup allowlist)"
+        );
     }
 }

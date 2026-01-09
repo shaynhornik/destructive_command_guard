@@ -3,6 +3,11 @@
 //! This includes patterns for:
 //! - rm -rf outside temp directories (blocked)
 //! - rm -rf in /tmp, /var/tmp, $TMPDIR (allowed)
+//!
+//! # Build Directory Cleanup
+//!
+//! For safe deletion of build directories (target/, dist/, `node_modules`/, etc.),
+//! enable the `safe.cleanup` pack. See [`crate::packs::safe::cleanup`] for details.
 
 use crate::packs::{DestructivePattern, Pack, SafePattern};
 use crate::{destructive_pattern, safe_pattern};
