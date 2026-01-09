@@ -4574,4 +4574,291 @@ exclude = ["target/**"]
             panic!("Expected Scan command");
         }
     }
+
+    // ==========================================================================
+    // Doctor diagnostics tests (git_safety_guard-1gt.7.1)
+    // ==========================================================================
+
+    #[test]
+    fn hook_diagnostics_default_is_not_healthy() {
+        let diag = HookDiagnostics::default();
+        // Default has settings_valid=false, dcg_hook_count=0
+        assert!(!diag.is_healthy());
+        assert!(diag.has_issues());
+    }
+
+    #[test]
+    fn hook_diagnostics_healthy_single_hook() {
+        let diag = HookDiagnostics {
+            settings_exists: true,
+            settings_valid: true,
+            settings_error: None,
+            dcg_hook_count: 1,
+            wrong_matcher_hooks: vec![],
+            missing_executable_hooks: vec![],
+            other_hooks_count: 2,
+        };
+        assert!(diag.is_healthy());
+        assert!(!diag.has_issues());
+    }
+
+    #[test]
+    fn hook_diagnostics_unhealthy_zero_hooks() {
+        let diag = HookDiagnostics {
+            settings_exists: true,
+            settings_valid: true,
+            settings_error: None,
+            dcg_hook_count: 0,
+            wrong_matcher_hooks: vec![],
+            missing_executable_hooks: vec![],
+            other_hooks_count: 0,
+        };
+        assert!(!diag.is_healthy());
+        assert!(diag.has_issues());
+    }
+
+    #[test]
+    fn hook_diagnostics_unhealthy_duplicate_hooks() {
+        let diag = HookDiagnostics {
+            settings_exists: true,
+            settings_valid: true,
+            settings_error: None,
+            dcg_hook_count: 2, // Duplicates
+            wrong_matcher_hooks: vec![],
+            missing_executable_hooks: vec![],
+            other_hooks_count: 0,
+        };
+        assert!(!diag.is_healthy());
+        assert!(diag.has_issues());
+    }
+
+    #[test]
+    fn hook_diagnostics_unhealthy_wrong_matcher() {
+        let diag = HookDiagnostics {
+            settings_exists: true,
+            settings_valid: true,
+            settings_error: None,
+            dcg_hook_count: 1,
+            wrong_matcher_hooks: vec!["Write".to_string()],
+            missing_executable_hooks: vec![],
+            other_hooks_count: 0,
+        };
+        assert!(!diag.is_healthy());
+        assert!(diag.has_issues());
+    }
+
+    #[test]
+    fn hook_diagnostics_unhealthy_missing_executable() {
+        let diag = HookDiagnostics {
+            settings_exists: true,
+            settings_valid: true,
+            settings_error: None,
+            dcg_hook_count: 1,
+            wrong_matcher_hooks: vec![],
+            missing_executable_hooks: vec!["/nonexistent/path/dcg".to_string()],
+            other_hooks_count: 0,
+        };
+        assert!(!diag.is_healthy());
+        assert!(diag.has_issues());
+    }
+
+    #[test]
+    fn hook_diagnostics_unhealthy_invalid_settings() {
+        let diag = HookDiagnostics {
+            settings_exists: true,
+            settings_valid: false,
+            settings_error: Some("Invalid JSON".to_string()),
+            dcg_hook_count: 0,
+            wrong_matcher_hooks: vec![],
+            missing_executable_hooks: vec![],
+            other_hooks_count: 0,
+        };
+        assert!(!diag.is_healthy());
+        assert!(diag.has_issues());
+    }
+
+    #[test]
+    fn config_diagnostics_default_has_no_errors() {
+        let diag = ConfigDiagnostics::default();
+        assert!(!diag.has_errors());
+        assert!(!diag.has_warnings());
+    }
+
+    #[test]
+    fn config_diagnostics_parse_error_is_error() {
+        let diag = ConfigDiagnostics {
+            config_path: Some(std::path::PathBuf::from("/test/config.toml")),
+            parse_error: Some("Invalid TOML".to_string()),
+            unknown_packs: vec![],
+            invalid_override_patterns: vec![],
+        };
+        assert!(diag.has_errors());
+        assert!(!diag.has_warnings());
+    }
+
+    #[test]
+    fn config_diagnostics_unknown_packs_is_error() {
+        let diag = ConfigDiagnostics {
+            config_path: Some(std::path::PathBuf::from("/test/config.toml")),
+            parse_error: None,
+            unknown_packs: vec!["nonexistent.pack".to_string()],
+            invalid_override_patterns: vec![],
+        };
+        assert!(diag.has_errors());
+        assert!(!diag.has_warnings());
+    }
+
+    #[test]
+    fn config_diagnostics_invalid_patterns_is_warning() {
+        let diag = ConfigDiagnostics {
+            config_path: Some(std::path::PathBuf::from("/test/config.toml")),
+            parse_error: None,
+            unknown_packs: vec![],
+            invalid_override_patterns: vec![("invalid(regex".to_string(), "error".to_string())],
+        };
+        assert!(!diag.has_errors());
+        assert!(diag.has_warnings());
+    }
+
+    #[test]
+    fn is_valid_pack_id_accepts_core() {
+        assert!(is_valid_pack_id("core"));
+    }
+
+    #[test]
+    fn is_valid_pack_id_accepts_category_prefix() {
+        assert!(is_valid_pack_id("containers"));
+        assert!(is_valid_pack_id("kubernetes"));
+        assert!(is_valid_pack_id("database"));
+        assert!(is_valid_pack_id("cloud"));
+    }
+
+    #[test]
+    fn is_valid_pack_id_accepts_core_git() {
+        // core.git should be a valid pack in the registry
+        assert!(is_valid_pack_id("core.git"));
+    }
+
+    #[test]
+    fn is_valid_pack_id_rejects_unknown() {
+        assert!(!is_valid_pack_id("nonexistent"));
+        assert!(!is_valid_pack_id("fake.pack"));
+        assert!(!is_valid_pack_id(""));
+    }
+
+    #[test]
+    fn is_valid_pack_id_rejects_category_with_unknown_subpack() {
+        // containers is a valid category, but containers.fake is not a valid pack
+        assert!(!is_valid_pack_id("containers.fake"));
+    }
+
+    #[test]
+    fn diagnose_hook_wiring_from_json_valid_settings() {
+        // Test the JSON parsing logic by calling the internal helpers
+        let settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            { "type": "command", "command": "dcg" }
+                        ]
+                    }
+                ]
+            }
+        });
+
+        // Verify the structure is valid and has dcg hook
+        let pre_tool_use = settings
+            .get("hooks")
+            .and_then(|h| h.get("PreToolUse"))
+            .and_then(|p| p.as_array())
+            .expect("PreToolUse array");
+
+        assert_eq!(pre_tool_use.len(), 1);
+        assert!(is_dcg_hook_entry(&pre_tool_use[0]));
+    }
+
+    #[test]
+    fn diagnose_hook_wiring_from_json_wrong_matcher() {
+        // dcg hook with wrong matcher (Write instead of Bash)
+        // Note: is_dcg_hook_entry requires BOTH Bash matcher AND dcg command,
+        // so this entry won't be recognized as a dcg hook entry.
+        // The diagnose_hook_wiring function detects this case separately.
+        let settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Write",
+                        "hooks": [
+                            { "type": "command", "command": "dcg" }
+                        ]
+                    }
+                ]
+            }
+        });
+
+        let pre_tool_use = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        let entry = &pre_tool_use[0];
+
+        // Entry has dcg command but is_dcg_hook_entry returns false due to wrong matcher
+        assert!(
+            !is_dcg_hook_entry(entry),
+            "should not be dcg hook due to wrong matcher"
+        );
+
+        // Verify the command is dcg
+        let cmd = entry["hooks"][0]["command"].as_str().unwrap();
+        assert!(is_dcg_command(cmd));
+
+        // Verify matcher is wrong
+        let matcher = entry.get("matcher").and_then(|m| m.as_str());
+        assert_eq!(matcher, Some("Write"));
+    }
+
+    #[test]
+    fn diagnose_hook_wiring_from_json_multiple_dcg_hooks() {
+        // Multiple dcg hooks (duplicates)
+        let settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            { "type": "command", "command": "dcg" }
+                        ]
+                    },
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            { "type": "command", "command": "/usr/local/bin/dcg" }
+                        ]
+                    }
+                ]
+            }
+        });
+
+        let pre_tool_use = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        let dcg_count = pre_tool_use.iter().filter(|e| is_dcg_hook_entry(e)).count();
+
+        assert_eq!(dcg_count, 2, "should detect duplicate dcg hooks");
+    }
+
+    #[test]
+    fn is_dcg_command_recognizes_various_forms() {
+        assert!(is_dcg_command("dcg"));
+        assert!(is_dcg_command("/usr/local/bin/dcg"));
+        assert!(is_dcg_command("/home/user/.cargo/bin/dcg"));
+        assert!(is_dcg_command("~/.local/bin/dcg"));
+
+        assert!(!is_dcg_command("other-hook"));
+        assert!(!is_dcg_command(""));
+        assert!(!is_dcg_command("dcg-wrapper"));
+    }
+
+    #[test]
+    fn smoke_test_passes_with_default_config() {
+        // The smoke test should pass with default configuration
+        assert!(run_smoke_test(), "smoke test should pass");
+    }
 }
