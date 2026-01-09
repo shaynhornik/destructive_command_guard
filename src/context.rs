@@ -677,7 +677,8 @@ impl SafeStringRegistry {
 /// # Arguments
 ///
 /// * `command` - The full command string
-/// * `arg_index` - The zero-based index of the argument to check
+/// * `preceding_flag` - The flag (e.g., `-m`, `--message`) that owns the
+///   argument under consideration, if any
 ///
 /// # Returns
 ///
