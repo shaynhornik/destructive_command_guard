@@ -130,6 +130,7 @@ pub fn strip_wrapper_prefixes(command: &str) -> NormalizedCommand<'_> {
 ///
 /// Handles: `-E`, `-H`, `-n`, `-k`, `-K`, `-S`, `-b`, `-u <user>`, `-g <group>`,
 /// `-h <host>`, `-p <prompt>`, and `--` terminator.
+#[allow(clippy::too_many_lines)]
 fn strip_sudo(command: &str) -> Option<(String, StrippedWrapper)> {
     // Options that take no argument
     const SIMPLE_FLAGS: &[char] = &['E', 'H', 'n', 'k', 'K', 'S', 'b', 'i', 'P', 'A'];
