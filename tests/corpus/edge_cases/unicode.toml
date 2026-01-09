@@ -4,22 +4,22 @@
 
 [[case]]
 description = "command with emoji"
-command = "echo 'Hello World!'"
+command = "echo '🚀 Hello World! 🎉'"
 expected = "allow"
 
 [[case]]
 description = "command with unicode filename"
-command = "cat hello.txt"
+command = "cat 你好.txt"
 expected = "allow"
 
 [[case]]
 description = "command with CJK characters"
-command = "echo hello"
+command = "echo '你好世界'"
 expected = "allow"
 
 [[case]]
 description = "command with RTL text"
-command = "echo hello"
+command = "echo 'مرحبا بالعالم'"
 expected = "allow"
 
 [[case]]

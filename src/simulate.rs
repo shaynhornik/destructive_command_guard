@@ -279,23 +279,31 @@ fn parse_line(line: &str, max_command_bytes: Option<usize>) -> ParsedLine {
         return ParsedLine::Empty;
     }
 
-    // Try Hook JSON format first (starts with '{')
-    if trimmed.starts_with('{') {
-        return parse_hook_json(trimmed, max_command_bytes);
-    }
-
-    // Try Decision Log format (starts with a specific marker - future)
-    // For now, decision logs will use a schema version prefix
+    // Try Decision Log format first (unambiguous prefix)
     if trimmed.starts_with("DCG_LOG_V") {
         return parse_decision_log(trimmed, max_command_bytes);
+    }
+
+    // Try Hook JSON format (starts with '{' and parses as valid hook JSON)
+    // Note: Shell brace blocks like `{ echo hello; }` also start with '{',
+    // so we must fall back to plain command if JSON parsing fails.
+    if trimmed.starts_with('{') {
+        if let Some(result) = try_parse_hook_json(trimmed, max_command_bytes) {
+            return result;
+        }
+        // Not valid hook JSON, treat as plain command (e.g., shell brace block)
+        return parse_plain_command(trimmed, max_command_bytes);
     }
 
     // Default: treat as plain command
     parse_plain_command(trimmed, max_command_bytes)
 }
 
-/// Parse a line as hook JSON format.
-fn parse_hook_json(line: &str, max_command_bytes: Option<usize>) -> ParsedLine {
+/// Try to parse a line as hook JSON format.
+///
+/// Returns `Some(ParsedLine)` if this is valid hook JSON (including Malformed for missing fields),
+/// or `None` if the line is not valid JSON (should fall back to plain command).
+fn try_parse_hook_json(line: &str, max_command_bytes: Option<usize>) -> Option<ParsedLine> {
     // Minimal JSON structure we expect:
     // {"tool_name":"Bash","tool_input":{"command":"..."}}
 
@@ -310,49 +318,48 @@ fn parse_hook_json(line: &str, max_command_bytes: Option<usize>) -> ParsedLine {
         command: Option<String>,
     }
 
-    match serde_json::from_str::<HookInput>(line) {
-        Ok(input) => {
-            // Check if it's a Bash tool
-            if input.tool_name != "Bash" {
-                return ParsedLine::Ignore {
-                    reason: "non-Bash tool",
-                };
-            }
+    // Try to parse as JSON - if it fails, return None to fall back to plain command
+    let input: HookInput = serde_json::from_str(line).ok()?;
 
-            // Extract command
-            let Some(tool_input) = input.tool_input else {
-                return ParsedLine::Malformed {
-                    error: "missing tool_input".to_string(),
-                };
-            };
+    // At this point we have valid JSON with tool_name, so treat it as hook format
+    // (even if it's malformed, it's still hook JSON, not a plain command)
 
-            let Some(command) = tool_input.command else {
-                return ParsedLine::Malformed {
-                    error: "missing command in tool_input".to_string(),
-                };
-            };
-
-            // Check command length limit
-            if let Some(max_bytes) = max_command_bytes {
-                if command.len() > max_bytes {
-                    return ParsedLine::Malformed {
-                        error: format!(
-                            "command exceeds max length ({} > {max_bytes} bytes)",
-                            command.len()
-                        ),
-                    };
-                }
-            }
-
-            ParsedLine::Command {
-                command,
-                format: SimulateInputFormat::HookJson,
-            }
-        }
-        Err(e) => ParsedLine::Malformed {
-            error: format!("invalid JSON: {e}"),
-        },
+    // Check if it's a Bash tool
+    if input.tool_name != "Bash" {
+        return Some(ParsedLine::Ignore {
+            reason: "non-Bash tool",
+        });
     }
+
+    // Extract command - if missing, it's malformed hook JSON (not a plain command)
+    let Some(tool_input) = input.tool_input else {
+        return Some(ParsedLine::Malformed {
+            error: "missing tool_input".to_string(),
+        });
+    };
+
+    let Some(command) = tool_input.command else {
+        return Some(ParsedLine::Malformed {
+            error: "missing command in tool_input".to_string(),
+        });
+    };
+
+    // Check command length limit
+    if let Some(max_bytes) = max_command_bytes {
+        if command.len() > max_bytes {
+            return Some(ParsedLine::Malformed {
+                error: format!(
+                    "command exceeds max length ({} > {max_bytes} bytes)",
+                    command.len()
+                ),
+            });
+        }
+    }
+
+    Some(ParsedLine::Command {
+        command,
+        format: SimulateInputFormat::HookJson,
+    })
 }
 
 /// Parse a line as decision log format (future schema).
@@ -512,18 +519,36 @@ mod tests {
     }
 
     #[test]
-    fn malformed_json() {
+    fn invalid_json_falls_back_to_plain_command() {
+        // Invalid JSON starting with '{' should be treated as a plain command,
+        // not malformed. This handles shell brace blocks like `{ echo hello; }`.
         let result = parse_line("{invalid json}", None);
         match result {
-            ParsedLine::Malformed { error } => {
-                assert!(error.contains("invalid JSON"));
+            ParsedLine::Command { command, format } => {
+                assert_eq!(command, "{invalid json}");
+                assert_eq!(format, SimulateInputFormat::PlainCommand);
             }
-            _ => panic!("expected Malformed, got {result:?}"),
+            _ => panic!("expected Command (PlainCommand), got {result:?}"),
         }
     }
 
     #[test]
-    fn malformed_json_missing_command() {
+    fn shell_brace_block_as_plain_command() {
+        // Shell brace blocks should be treated as plain commands
+        let result = parse_line("{ echo hello; } | cat", None);
+        match result {
+            ParsedLine::Command { command, format } => {
+                assert_eq!(command, "{ echo hello; } | cat");
+                assert_eq!(format, SimulateInputFormat::PlainCommand);
+            }
+            _ => panic!("expected Command (PlainCommand), got {result:?}"),
+        }
+    }
+
+    #[test]
+    fn valid_json_missing_command_is_malformed() {
+        // Valid JSON with missing fields is still hook JSON format, just malformed
+        // (not a plain command)
         let line = r#"{"tool_name":"Bash","tool_input":{}}"#;
         let result = parse_line(line, None);
         match result {
@@ -618,10 +643,11 @@ echo hello
 
     #[test]
     fn parser_strict_mode_fails_on_malformed() {
-        let input = r"git status
-{invalid json}
+        // Use valid JSON with missing command field to trigger malformed error
+        let input = r#"git status
+{"tool_name":"Bash","tool_input":{}}
 echo hello
-";
+"#;
 
         let parser = SimulateParser::new(input.as_bytes(), SimulateLimits::default()).strict(true);
         let result = parser.collect_commands();
@@ -633,16 +659,34 @@ echo hello
 
     #[test]
     fn parser_non_strict_continues_on_malformed() {
-        let input = r"git status
-{invalid json}
+        // Use valid JSON with missing command field to trigger malformed error
+        let input = r#"git status
+{"tool_name":"Bash","tool_input":{}}
 echo hello
-";
+"#;
 
         let parser = SimulateParser::new(input.as_bytes(), SimulateLimits::default()).strict(false);
         let (commands, stats) = parser.collect_commands().unwrap();
 
         assert_eq!(commands.len(), 2); // git status and echo hello
         assert_eq!(stats.malformed_count, 1);
+    }
+
+    #[test]
+    fn parser_treats_invalid_json_as_plain_command() {
+        // Invalid JSON (like shell brace blocks) should be treated as plain commands
+        let input = r"git status
+{ echo hello; }
+echo world
+";
+
+        let parser = SimulateParser::new(input.as_bytes(), SimulateLimits::default());
+        let (commands, stats) = parser.collect_commands().unwrap();
+
+        assert_eq!(commands.len(), 3); // All three are plain commands
+        assert_eq!(commands[1].command, "{ echo hello; }");
+        assert_eq!(commands[1].format, SimulateInputFormat::PlainCommand);
+        assert_eq!(stats.malformed_count, 0);
     }
 
     // -------------------------------------------------------------------------
