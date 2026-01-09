@@ -1205,9 +1205,11 @@ pub fn global_quick_reject(cmd: &str) -> bool {
 pub fn pack_aware_quick_reject(cmd: &str, enabled_keywords: &[&str]) -> bool {
     let bytes = cmd.as_bytes();
 
-    // Fast path: if no keywords are configured, nothing to check
+    // Conservative: if the caller provides no keywords, we cannot safely conclude
+    // that pack evaluation can be skipped (a pack may have empty/incorrect keywords).
+    // Returning false forces evaluation rather than silently allowing everything.
     if enabled_keywords.is_empty() {
-        return true;
+        return false;
     }
 
     // Check if any keyword appears in the command
@@ -1224,6 +1226,18 @@ pub fn pack_aware_quick_reject(cmd: &str, enabled_keywords: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pack_aware_quick_reject_empty_keywords_is_conservative() {
+        assert!(
+            !pack_aware_quick_reject("ls -la", &[]),
+            "empty keyword list must not allow skipping pack evaluation"
+        );
+        assert!(
+            !pack_aware_quick_reject("git reset --hard", &[]),
+            "empty keyword list must not allow skipping pack evaluation"
+        );
+    }
 
     /// Test that `pack_tier` returns correct tiers for all known categories.
     #[test]

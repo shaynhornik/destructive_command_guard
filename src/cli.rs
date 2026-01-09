@@ -183,6 +183,21 @@ pub enum Command {
     #[command(name = "scan")]
     Scan(ScanCommand),
 
+    /// Simulate policy evaluation on command logs (replay/dry-run)
+    ///
+    /// Parses a file containing commands (one per line) and evaluates each
+    /// against the current policy. Useful for:
+    /// - Rolling out new packs in warn-only mode
+    /// - Analyzing false positive patterns
+    /// - Generating allowlist candidates
+    ///
+    /// Input formats are auto-detected per line:
+    /// - Plain command strings
+    /// - Hook JSON (`{"tool_name":"Bash","tool_input":{"command":"..."}}`)
+    /// - Decision log entries (`DCG_LOG_V1|...`)
+    #[command(name = "simulate")]
+    Simulate(SimulateCommand),
+
     /// Explain why a command would be blocked or allowed (decision trace)
     ///
     /// Shows the full decision pipeline: keyword gating, pack evaluation,
@@ -286,6 +301,51 @@ pub enum ScanAction {
     /// Uninstall the `.git/hooks/pre-commit` hook installed by dcg.
     #[command(name = "uninstall-pre-commit")]
     UninstallPreCommit,
+}
+
+/// `dcg simulate` command arguments.
+///
+/// This task (git_safety_guard-1gt.8.1) implements the streaming parser.
+/// The evaluation loop and aggregation will be added in git_safety_guard-1gt.8.2.
+#[derive(Args, Debug)]
+pub struct SimulateCommand {
+    /// Input file (use "-" for stdin)
+    #[arg(long, short = 'f', default_value = "-")]
+    pub file: String,
+
+    /// Maximum number of lines to process
+    #[arg(long)]
+    pub max_lines: Option<usize>,
+
+    /// Maximum bytes to read from input
+    #[arg(long)]
+    pub max_bytes: Option<usize>,
+
+    /// Maximum command length in bytes (longer commands are skipped)
+    #[arg(long, default_value = "65536")]
+    pub max_command_bytes: usize,
+
+    /// Fail on first malformed line (default: count and continue)
+    #[arg(long)]
+    pub strict: bool,
+
+    /// Output format (for parse stats, evaluation comes later)
+    #[arg(long, short = 'F', value_enum, default_value = "pretty")]
+    pub format: SimulateFormat,
+
+    /// Show verbose output (per-line format detection, etc.)
+    #[arg(long, short = 'v')]
+    pub verbose: bool,
+}
+
+/// Output format for simulate command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum SimulateFormat {
+    /// Human-readable output
+    #[default]
+    Pretty,
+    /// Structured JSON output
+    Json,
 }
 
 /// Output format for explain command.
@@ -492,6 +552,9 @@ pub fn run_command(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Command::Scan(scan)) => {
             handle_scan_command(&config, scan)?;
+        }
+        Some(Command::Simulate(sim)) => {
+            handle_simulate_command(sim)?;
         }
         Some(Command::Explain {
             command,
@@ -1075,6 +1138,109 @@ impl ScanSettingsOverrides {
     }
 }
 
+/// Handle the `dcg simulate` command.
+///
+/// This implements git_safety_guard-1gt.8.1 (streaming parser).
+/// The evaluation loop and aggregation (git_safety_guard-1gt.8.2) is not yet implemented.
+fn handle_simulate_command(sim: SimulateCommand) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::simulate::{ParsedLine, SimulateLimits, SimulateParser};
+    use std::fs::File;
+    use std::io::{self, BufReader};
+
+    let SimulateCommand {
+        file,
+        max_lines,
+        max_bytes,
+        max_command_bytes,
+        strict,
+        format,
+        verbose,
+    } = sim;
+
+    let limits = SimulateLimits {
+        max_lines,
+        max_bytes,
+        max_command_bytes: Some(max_command_bytes),
+    };
+
+    // Open input (file or stdin)
+    let reader: Box<dyn io::Read> = if file == "-" {
+        Box::new(io::stdin())
+    } else {
+        Box::new(BufReader::new(File::open(&file)?))
+    };
+
+    let mut parser = SimulateParser::new(reader, limits).strict(strict);
+
+    // Process lines and optionally print verbose output
+    // (Full evaluation will be added in git_safety_guard-1gt.8.2)
+    while let Some(result) = parser.next_line() {
+        match result {
+            Ok(ParsedLine::Command {
+                command,
+                format: fmt,
+            }) => {
+                if verbose {
+                    eprintln!("[{:?}] {}", fmt, truncate_command_for_display(&command, 80));
+                }
+            }
+            Ok(ParsedLine::Ignore { reason }) => {
+                if verbose {
+                    eprintln!("[ignored] {reason}");
+                }
+            }
+            Ok(ParsedLine::Malformed { error }) => {
+                if verbose {
+                    eprintln!("[malformed] {error}");
+                }
+            }
+            Ok(ParsedLine::Empty) => {}
+            Err(e) => {
+                // In strict mode, this is a fatal error
+                return Err(Box::new(e));
+            }
+        }
+    }
+
+    let stats = parser.into_stats();
+
+    // Output stats
+    match format {
+        SimulateFormat::Pretty => {
+            println!("Simulate parse statistics:");
+            println!("  Lines read:         {}", stats.lines_read);
+            println!("  Bytes read:         {}", stats.bytes_read);
+            println!("  Commands extracted: {}", stats.commands_extracted);
+            println!("  Malformed lines:    {}", stats.malformed_count);
+            println!("  Ignored lines:      {}", stats.ignored_count);
+            println!("  Empty lines:        {}", stats.empty_count);
+            if stats.stopped_at_limit {
+                if let Some(ref limit) = stats.limit_hit {
+                    println!("  Stopped at limit:   {limit:?}");
+                }
+            }
+            println!();
+            println!("Note: Command evaluation will be added in git_safety_guard-1gt.8.2");
+        }
+        SimulateFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&stats)?);
+        }
+    }
+
+    Ok(())
+}
+
+/// Truncate a command string for display, adding ellipsis if needed.
+fn truncate_command_for_display(s: &str, max_len: usize) -> String {
+    // Replace newlines with visible markers
+    let s = s.replace('\n', "\\n").replace('\r', "\\r");
+    if s.len() <= max_len {
+        s
+    } else {
+        format!("{}...", &s[..max_len.saturating_sub(3)])
+    }
+}
+
 fn handle_scan_command(
     config: &Config,
     scan: ScanCommand,
@@ -1387,52 +1553,75 @@ fn filter_paths(
 
 /// Simple glob matching (supports * and **).
 fn glob_match(pattern: &str, path: &str) -> bool {
-    // Very basic glob support for now - full glob crate could be added later
-    if pattern.contains("**") {
-        // ** matches any path segment(s)
-        let parts: Vec<&str> = pattern.split("**").collect();
-        if parts.len() == 2 {
-            let prefix = parts[0].trim_end_matches('/');
-            let suffix = parts[1].trim_start_matches('/');
+    use std::borrow::Cow;
 
-            // Check prefix matches
-            if !prefix.is_empty() && !path.starts_with(prefix) {
-                return false;
-            }
-
-            // Check suffix - may contain wildcards
-            if suffix.is_empty() {
-                return true;
-            }
-
-            // For suffix like "*.rs", we need to check if any segment matches
-            if suffix.contains('*') {
-                // Apply single-star matching to the remainder after prefix
-                let remainder = if prefix.is_empty() {
-                    path
-                } else {
-                    path.strip_prefix(prefix)
-                        .and_then(|s| s.strip_prefix('/'))
-                        .unwrap_or(path)
-                };
-
-                // For **/*.ext pattern, check if any path component matches *.ext
-                let ext_parts: Vec<&str> = suffix.split('*').collect();
-                if ext_parts.len() == 2 {
-                    let suffix_prefix = ext_parts[0];
-                    let suffix_suffix = ext_parts[1];
-                    // Check if any segment or the whole remainder matches
-                    return remainder.ends_with(suffix_suffix)
-                        && (suffix_prefix.is_empty()
-                            || remainder
-                                .rsplit('/')
-                                .next()
-                                .is_some_and(|s| s.starts_with(suffix_prefix)));
-                }
-            }
-
-            return path.ends_with(suffix);
+    fn normalize_separators(s: &str) -> Cow<'_, str> {
+        if s.contains('\\') {
+            Cow::Owned(s.replace('\\', "/"))
+        } else {
+            Cow::Borrowed(s)
         }
+    }
+
+    fn matches_glob_prefix(prefix_raw: &str, path: &str) -> bool {
+        if prefix_raw.is_empty() {
+            return true;
+        }
+
+        // Allow matching the prefix directory itself (e.g., pattern `src/**` should match `src`)
+        // while still requiring a path boundary (avoid matching `src2/...`).
+        let prefix_no_slash = prefix_raw.trim_end_matches('/');
+        if path == prefix_no_slash {
+            return true;
+        }
+
+        if prefix_raw.ends_with('/') {
+            return path.starts_with(prefix_raw);
+        }
+
+        // If the pattern author omitted a trailing '/', enforce a boundary at the next char.
+        if !path.starts_with(prefix_raw) {
+            return false;
+        }
+
+        path.as_bytes()
+            .get(prefix_raw.len())
+            .is_some_and(|b| *b == b'/')
+    }
+
+    let pattern = normalize_separators(pattern);
+    let path = normalize_separators(path);
+    let pattern = pattern.as_ref();
+    let path = path.as_ref();
+
+    // Very basic glob support for now - full glob crate could be added later
+    if let Some((prefix_raw, suffix_raw)) = pattern.split_once("**") {
+        // ** matches any path segment(s)
+        if !matches_glob_prefix(prefix_raw, path) {
+            return false;
+        }
+
+        let suffix = suffix_raw.trim_start_matches('/');
+        if suffix.is_empty() {
+            return true;
+        }
+
+        // For suffix like "*.rs", check the final path component.
+        if suffix.contains('*') && !suffix.contains('/') {
+            let last = path.rsplit('/').next().unwrap_or(path);
+            let parts: Vec<&str> = suffix.split('*').collect();
+            if parts.len() == 2 {
+                let (pre, suf) = (parts[0], parts[1]);
+                if !last.starts_with(pre) || !last.ends_with(suf) {
+                    return false;
+                }
+
+                let min_len = pre.len() + suf.len();
+                return last.len() >= min_len;
+            }
+        }
+
+        return path.ends_with(suffix);
     }
 
     if pattern.contains('*') {
@@ -1839,6 +2028,7 @@ fn handle_explain(
 }
 
 /// Check installation, configuration, and hook registration
+#[allow(clippy::too_many_lines, clippy::unnecessary_unwrap)]
 fn doctor(fix: bool) {
     use colored::Colorize;
 
@@ -1870,40 +2060,97 @@ fn doctor(fix: bool) {
         println!("  This is normal if Claude Code hasn't been configured yet");
     }
 
-    // Check 3: Hook is registered
-    print!("Checking hook registration... ");
-    match check_hook_registered() {
-        Ok(true) => println!("{}", "OK".green()),
-        Ok(false) => {
-            println!("{}", "NOT REGISTERED".red());
-            issues += 1;
-            if fix {
-                println!("  Attempting to register hook...");
-                if install_hook(false).is_ok() {
-                    println!("  {}", "Fixed!".green());
-                    fixed += 1;
-                } else {
-                    println!("  {}", "Failed to fix".red());
-                }
+    // Check 3: Hook wiring (expanded diagnostics)
+    print!("Checking hook wiring... ");
+    let hook_diag = diagnose_hook_wiring();
+
+    if !hook_diag.settings_exists {
+        println!("{}", "SKIPPED".yellow());
+        println!("  No settings file to check");
+    } else if let Some(ref err) = hook_diag.settings_error {
+        println!("{}", "ERROR".red());
+        issues += 1;
+        println!("  {err}");
+        println!("  → Fix the settings.json file or reinstall Claude Code");
+    } else if hook_diag.dcg_hook_count == 0 {
+        println!("{}", "NOT REGISTERED".red());
+        issues += 1;
+        if fix {
+            println!("  Attempting to register hook...");
+            if install_hook(false).is_ok() {
+                println!("  {}", "Fixed!".green());
+                fixed += 1;
             } else {
-                println!("  Run 'dcg install' to register the hook");
+                println!("  {}", "Failed to fix".red());
             }
+        } else {
+            println!("  → Run 'dcg install' to register the hook");
         }
-        Err(e) => {
-            println!("{}", "ERROR".red());
-            println!("  {e}");
+    } else if hook_diag.dcg_hook_count > 1 {
+        println!("{}", "WARNING".yellow());
+        println!(
+            "  Found {} dcg hook entries (expected 1)",
+            hook_diag.dcg_hook_count
+        );
+        println!("  → Run 'dcg uninstall && dcg install' to fix duplicates");
+    } else if !hook_diag.wrong_matcher_hooks.is_empty() {
+        println!("{}", "MISCONFIGURED".red());
+        issues += 1;
+        println!(
+            "  Hook registered with wrong matcher: {:?}",
+            hook_diag.wrong_matcher_hooks
+        );
+        println!("  → dcg must be a Bash hook, not other tool types");
+        println!("  → Run 'dcg uninstall && dcg install' to fix");
+    } else if !hook_diag.missing_executable_hooks.is_empty() {
+        println!("{}", "BROKEN".red());
+        issues += 1;
+        for path in &hook_diag.missing_executable_hooks {
+            println!("  Hook points to missing executable: {path}");
         }
+        println!("  → Run 'dcg uninstall && dcg install' to fix");
+    } else {
+        println!("{}", "OK".green());
     }
 
-    // Check 4: Config file
+    // Check 4: Config validation (expanded diagnostics)
     print!("Checking configuration... ");
-    let config_path = config_path();
-    if config_path.exists() {
-        println!("{} ({})", "OK".green(), config_path.display());
-    } else {
-        println!("{}", "USING DEFAULTS".yellow());
-        println!("  No config file found, using defaults");
-        println!("  Run 'dcg init -o ~/.config/dcg/config.toml' to create one");
+    let config_diag = validate_config_diagnostics();
+
+    match &config_diag.config_path {
+        None => {
+            println!("{}", "USING DEFAULTS".yellow());
+            println!("  No config file found, using built-in defaults");
+            println!("  → Run 'dcg init -o ~/.config/dcg/config.toml' to create one");
+        }
+        Some(path) if config_diag.parse_error.is_some() => {
+            println!("{}", "INVALID".red());
+            issues += 1;
+            println!("  Config: {}", path.display());
+            if let Some(ref err) = config_diag.parse_error {
+                println!("  {err}");
+            }
+            println!("  → Fix the TOML syntax error in your config file");
+        }
+        Some(path) => {
+            if config_diag.has_errors() || config_diag.has_warnings() {
+                println!("{}", "WARNING".yellow());
+                println!("  Config: {}", path.display());
+                if !config_diag.unknown_packs.is_empty() {
+                    println!("  Unknown pack IDs: {:?}", config_diag.unknown_packs);
+                    println!("  → Run 'dcg packs list' to see available packs");
+                }
+                if !config_diag.invalid_override_patterns.is_empty() {
+                    println!("  Invalid override patterns:");
+                    for (pattern, error) in &config_diag.invalid_override_patterns {
+                        println!("    - \"{pattern}\": {error}");
+                    }
+                    println!("  → Fix the regex patterns in [overrides] section");
+                }
+            } else {
+                println!("{} ({})", "OK".green(), path.display());
+            }
+        }
     }
 
     // Check 5: Pattern packs
@@ -1911,6 +2158,17 @@ fn doctor(fix: bool) {
     let config = Config::load();
     let enabled = config.enabled_pack_ids();
     println!("{} ({} enabled)", "OK".green(), enabled.len());
+
+    // Check 6: Smoke test
+    print!("Running smoke test... ");
+    if run_smoke_test() {
+        println!("{}", "OK".green());
+    } else {
+        println!("{}", "FAILED".red());
+        issues += 1;
+        println!("  Evaluator smoke test failed");
+        println!("  → This may indicate a bug; please report it");
+    }
 
     println!();
     if issues == 0 {
@@ -2151,6 +2409,7 @@ fn which_dcg() -> Option<std::path::PathBuf> {
 }
 
 /// Check if the hook is registered in Claude Code settings
+#[allow(dead_code)]
 fn check_hook_registered() -> Result<bool, Box<dyn std::error::Error>> {
     let settings_path = claude_settings_path();
     if !settings_path.exists() {
@@ -2167,6 +2426,293 @@ fn check_hook_registered() -> Result<bool, Box<dyn std::error::Error>> {
         .is_some_and(|a| a.iter().any(is_dcg_hook_entry));
 
     Ok(registered)
+}
+
+// ============================================================================
+// Doctor: expanded diagnostics (git_safety_guard-1gt.7.1)
+// NOTE: These diagnostic types are scaffolding for future `dcg doctor` enhancements.
+// ============================================================================
+
+/// Detailed hook wiring diagnostics.
+#[allow(dead_code)]
+#[derive(Debug, Default)]
+struct HookDiagnostics {
+    /// Settings file exists
+    settings_exists: bool,
+    /// Settings JSON is valid
+    settings_valid: bool,
+    /// Error message if settings invalid
+    settings_error: Option<String>,
+    /// Number of dcg hook entries found
+    dcg_hook_count: usize,
+    /// Dcg hooks found with wrong matcher (not "Bash")
+    wrong_matcher_hooks: Vec<String>,
+    /// Dcg hooks pointing to absolute path that doesn't exist
+    missing_executable_hooks: Vec<String>,
+    /// Other non-dcg hooks in `PreToolUse`
+    other_hooks_count: usize,
+}
+
+#[allow(dead_code)]
+impl HookDiagnostics {
+    fn is_healthy(&self) -> bool {
+        self.settings_valid
+            && self.dcg_hook_count == 1
+            && self.wrong_matcher_hooks.is_empty()
+            && self.missing_executable_hooks.is_empty()
+    }
+
+    fn has_issues(&self) -> bool {
+        !self.settings_valid
+            || self.dcg_hook_count == 0
+            || self.dcg_hook_count > 1
+            || !self.wrong_matcher_hooks.is_empty()
+            || !self.missing_executable_hooks.is_empty()
+    }
+}
+
+/// Diagnose hook wiring in detail.
+#[allow(dead_code)]
+fn diagnose_hook_wiring() -> HookDiagnostics {
+    let mut diag = HookDiagnostics::default();
+    let settings_path = claude_settings_path();
+
+    if !settings_path.exists() {
+        return diag;
+    }
+    diag.settings_exists = true;
+
+    // Read and parse settings
+    let content = match std::fs::read_to_string(&settings_path) {
+        Ok(c) => c,
+        Err(e) => {
+            diag.settings_error = Some(format!("Failed to read settings: {e}"));
+            return diag;
+        }
+    };
+
+    let settings: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(s) => s,
+        Err(e) => {
+            diag.settings_error = Some(format!("Invalid JSON: {e}"));
+            return diag;
+        }
+    };
+    diag.settings_valid = true;
+
+    // Check hooks structure
+    let Some(hooks) = settings.get("hooks") else {
+        return diag;
+    };
+    let Some(pre_tool_use) = hooks.get("PreToolUse") else {
+        return diag;
+    };
+    let Some(entries) = pre_tool_use.as_array() else {
+        diag.settings_error = Some("hooks.PreToolUse is not an array".to_string());
+        diag.settings_valid = false;
+        return diag;
+    };
+
+    // Analyze each entry
+    for entry in entries {
+        let matcher = entry.get("matcher").and_then(|m| m.as_str());
+        let hooks_arr = entry.get("hooks").and_then(|h| h.as_array());
+
+        let Some(hooks_arr) = hooks_arr else {
+            continue;
+        };
+
+        for hook in hooks_arr {
+            let cmd = hook.get("command").and_then(|c| c.as_str());
+            if let Some(cmd) = cmd {
+                if is_dcg_command(cmd) {
+                    diag.dcg_hook_count += 1;
+
+                    // Check matcher
+                    if matcher != Some("Bash") {
+                        diag.wrong_matcher_hooks
+                            .push(matcher.unwrap_or("(none)").to_string());
+                    }
+
+                    // Check if absolute path exists
+                    if cmd.starts_with('/') && !std::path::Path::new(cmd).exists() {
+                        diag.missing_executable_hooks.push(cmd.to_string());
+                    }
+                } else {
+                    diag.other_hooks_count += 1;
+                }
+            }
+        }
+    }
+
+    diag
+}
+
+/// Config validation diagnostics.
+#[allow(dead_code)]
+#[derive(Debug, Default)]
+struct ConfigDiagnostics {
+    /// Config file path (if found)
+    config_path: Option<std::path::PathBuf>,
+    /// TOML parse error (if any)
+    parse_error: Option<String>,
+    /// Unknown pack IDs in enabled list
+    unknown_packs: Vec<String>,
+    /// Override patterns that failed to compile
+    invalid_override_patterns: Vec<(String, String)>, // (pattern, error)
+}
+
+#[allow(dead_code)]
+impl ConfigDiagnostics {
+    fn has_errors(&self) -> bool {
+        self.parse_error.is_some() || !self.unknown_packs.is_empty()
+    }
+
+    fn has_warnings(&self) -> bool {
+        !self.invalid_override_patterns.is_empty()
+    }
+}
+
+/// Validate configuration in detail.
+#[allow(dead_code)]
+fn validate_config_diagnostics() -> ConfigDiagnostics {
+    let mut diag = ConfigDiagnostics::default();
+
+    // Find config path
+    let cfg_path = config_path();
+    if cfg_path.exists() {
+        diag.config_path = Some(cfg_path);
+    } else {
+        // Try project-level config
+        if let Some(repo_root) = find_repo_root_from_cwd() {
+            let project_config = repo_root.join(".dcg.toml");
+            if project_config.exists() {
+                diag.config_path = Some(project_config);
+            }
+        }
+    }
+
+    // If no config, nothing to validate
+    let Some(ref path) = diag.config_path else {
+        return diag;
+    };
+
+    // Read and parse
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            diag.parse_error = Some(format!("Failed to read: {e}"));
+            return diag;
+        }
+    };
+
+    let config: Config = match toml::from_str(&content) {
+        Ok(c) => c,
+        Err(e) => {
+            diag.parse_error = Some(format!("Invalid TOML: {e}"));
+            return diag;
+        }
+    };
+
+    // Validate pack IDs
+    for pack_id in &config.packs.enabled {
+        if !is_valid_pack_id(pack_id) {
+            diag.unknown_packs.push(pack_id.clone());
+        }
+    }
+    for pack_id in &config.packs.disabled {
+        if !is_valid_pack_id(pack_id) {
+            diag.unknown_packs.push(pack_id.clone());
+        }
+    }
+
+    // Validate override patterns
+    let compiled = config.overrides.compile();
+    for ip in &compiled.invalid_patterns {
+        diag.invalid_override_patterns
+            .push((ip.pattern.clone(), ip.error.clone()));
+    }
+
+    diag
+}
+
+/// Check if a pack ID is valid (exists in registry or is a known category).
+#[allow(dead_code)]
+fn is_valid_pack_id(id: &str) -> bool {
+    // Direct pack lookup
+    if REGISTRY.get(id).is_some() {
+        return true;
+    }
+
+    // Check if it's a category prefix (e.g., "containers" enables all containers.*)
+    let known_categories = [
+        "core",
+        "containers",
+        "kubernetes",
+        "database",
+        "cloud",
+        "infrastructure",
+        "system",
+        "strict_git",
+        "package_managers",
+    ];
+
+    if known_categories.contains(&id) {
+        return true;
+    }
+
+    // Check if it's a valid category.subpack pattern
+    if let Some(dot_pos) = id.find('.') {
+        let category = &id[..dot_pos];
+        if known_categories.contains(&category) {
+            // It's a category prefix - check if the full ID exists
+            return REGISTRY.get(id).is_some();
+        }
+    }
+
+    false
+}
+
+/// Run a quick smoke test to verify the evaluator works.
+///
+/// Tests both an allow case and a deny case to ensure basic functionality.
+#[allow(dead_code)]
+fn run_smoke_test() -> bool {
+    let config = Config::load();
+    let enabled_packs = config.enabled_pack_ids();
+    let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
+    let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
+    let compiled_overrides = config.overrides.compile();
+    let allowlists = crate::LayeredAllowlist::default();
+    let heredoc_settings = config.heredoc_settings();
+
+    // Test 1: "git status" should be allowed
+    let allow_result = crate::evaluate_command_with_pack_order(
+        "git status",
+        &enabled_keywords,
+        &ordered_packs,
+        &compiled_overrides,
+        &allowlists,
+        &heredoc_settings,
+    );
+    if !allow_result.is_allowed() {
+        return false;
+    }
+
+    // Test 2: "git reset --hard" should be denied
+    let deny_result = crate::evaluate_command_with_pack_order(
+        "git reset --hard",
+        &enabled_keywords,
+        &ordered_packs,
+        &compiled_overrides,
+        &allowlists,
+        &heredoc_settings,
+    );
+    if deny_result.is_allowed() {
+        return false;
+    }
+
+    true
 }
 
 // ============================================================================
@@ -3939,6 +4485,15 @@ exclude = ["target/**"]
         assert!(glob_match("**/*.rs", "src/deep/nested/main.rs"));
         assert!(glob_match("src/**", "src/main.rs"));
         assert!(glob_match("src/**", "src/deep/nested/file.rs"));
+        assert!(glob_match("src/**", "src"));
+        assert!(!glob_match("src/**", "src2/main.rs"));
+        assert!(!glob_match("target/**", "targeted/file.txt"));
+        assert!(!glob_match(
+            ".github/workflows/**",
+            ".github/workflows2/ci.yml"
+        ));
+        assert!(glob_match("src/**", r"src\main.rs"));
+        assert!(glob_match("**/*.rs", r"src\main.rs"));
     }
 
     #[test]

@@ -69,6 +69,7 @@ pub mod hook;
 pub mod packs;
 pub mod perf;
 pub mod scan;
+pub mod simulate;
 pub mod suggestions;
 pub mod trace;
 
@@ -120,6 +121,12 @@ pub use suggestions::{Suggestion, SuggestionKind, get_suggestion_by_kind, get_su
 pub use scan::{
     ExtractedCommand, ScanDecision, ScanEvalContext, ScanFailOn, ScanFinding, ScanFormat,
     ScanOptions, ScanReport, ScanSeverity, ScanSummary, scan_paths, should_fail, sort_findings,
+};
+
+// Re-export simulate types for `dcg simulate`
+pub use simulate::{
+    LimitHit, ParseError, ParseStats, ParsedCommand, ParsedLine, SIMULATE_SCHEMA_VERSION,
+    SimulateInputFormat, SimulateLimits, SimulateParser,
 };
 
 // Re-export performance budget types
