@@ -143,10 +143,11 @@ create_fixture_repo() {
     echo "$tmp_dir"
 }
 
-# Cleanup helper
+# Cleanup helper (safely removes temp directories only)
 cleanup_repo() {
     local repo_dir="$1"
-    if [[ -d "$repo_dir" ]]; then
+    # Safety check: only remove directories under /tmp
+    if [[ -n "$repo_dir" ]] && [[ "$repo_dir" == /tmp/* ]] && [[ -d "$repo_dir" ]]; then
         rm -rf "$repo_dir"
     fi
 }
@@ -406,6 +407,7 @@ DOCKER_EOF
         log_fail "Finding should be from Dockerfile" "Dockerfile" "$finding_files"
     fi
 
+    log_test_start "safe.sh has no findings"
     if echo "$finding_files" | grep -q "safe.sh"; then
         log_fail "safe.sh should not have findings" "no safe.sh findings" "found safe.sh"
     else
@@ -484,7 +486,8 @@ SHELL_EOF
     # Check schema_version
     local schema_version
     schema_version=$(echo "$output" | jq -r '.schema_version // "missing"')
-    if [[ "$schema_version" != "missing" ]] && [[ "$schema_version" -gt 0 ]]; then
+    # Validate schema_version is a positive integer
+    if [[ "$schema_version" =~ ^[0-9]+$ ]] && [[ "$schema_version" -gt 0 ]]; then
         log_pass "Has schema_version: $schema_version"
     else
         log_fail "Missing schema_version" "integer > 0" "$schema_version"
