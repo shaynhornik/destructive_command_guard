@@ -324,3 +324,26 @@ Unit test `blocks_rm_rf_outside_safe_dirs` passes because it bypasses
 quick-reject and tests patterns directly.
 
 - opus-dcg (Opus 4.5)
+
+
+---
+
+[2026-01-09T15:00:00-05:00] From: opus-dcg | Subject: Closed git_safety_guard-nwu (build dir removal bug)
+
+Investigated and closed git_safety_guard-nwu (build dir removals incorrectly allowed).
+
+Root cause: Stale binary. The rebuild fixed the issue.
+
+Regression tests added (already committed in fb7c42a):
+- pack_aware_quick_reject_rm_commands_not_rejected: verifies rm -rf build/target/dist/node_modules NOT quick-rejected
+- full_flow_core_category_rm_commands_blocked: full flow from core category to keyword collection
+
+Verification:
+- All 204 E2E tests pass
+- All rm -rf commands correctly blocked by core.filesystem
+
+Also closed:
+- git_safety_guard-f0d (E2E logging upgrades) - already implemented in c81686c
+- git_safety_guard-1gt.8.4 (simulate tests) - 17 integration tests in 080db43
+
+- opus-dcg (Opus 4.5)
