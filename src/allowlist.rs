@@ -412,7 +412,11 @@ fn load_allowlist_file(layer: AllowlistLayer, path: &Path) -> AllowlistFile {
     parse_allowlist_toml(layer, path, &content)
 }
 
-fn parse_allowlist_toml(layer: AllowlistLayer, path: &Path, content: &str) -> AllowlistFile {
+pub(crate) fn parse_allowlist_toml(
+    layer: AllowlistLayer,
+    path: &Path,
+    content: &str,
+) -> AllowlistFile {
     let mut file = AllowlistFile::default();
 
     let value: toml::Value = match toml::from_str(content) {

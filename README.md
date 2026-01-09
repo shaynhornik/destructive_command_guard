@@ -666,6 +666,88 @@ This hook assumes the AI agent is **well-intentioned but fallible**. It's design
 1. **Check for false positives**: Some edge cases may not be covered by safe patterns
 2. **File an issue**: Report the command that was incorrectly blocked
 3. **Temporary bypass**: Have the user run the command manually in a separate terminal
+4. **Add to allowlist**: Use the allowlist feature below for persistent overrides
+
+### Resolving False Positives with Allowlists
+
+If dcg blocks a command that is safe in your specific context, you can add it to an allowlist. Allowlists support three layers (checked in order):
+
+1. **Project** (`.dcg/allowlist.toml`): Applies only to the current project
+2. **User** (`~/.config/dcg/allowlist.toml`): Applies to all your projects
+3. **System** (`/etc/dcg/allowlist.toml`): Applies system-wide
+
+**Adding a rule to the allowlist:**
+
+```bash
+# Allow a specific rule by ID (recommended)
+dcg allowlist add --rule core.git:reset-hard --reason "Used for CI cleanup"
+
+# Allow at project level (default is user level)
+dcg allowlist add --rule core.git:reset-hard --reason "CI cleanup" --scope project
+
+# Allow with expiration
+dcg allowlist add --rule core.git:clean-force --reason "Migration" --expires 7d
+
+# Allow a specific command (exact match)
+dcg allowlist add --command "rm -rf ./build" --reason "Build cleanup"
+```
+
+**Listing allowlist entries:**
+
+```bash
+# List all entries from all layers
+dcg allowlist list
+
+# List entries for a specific scope
+dcg allowlist list --scope project
+```
+
+**Removing entries:**
+
+```bash
+# Remove by rule ID
+dcg allowlist remove --rule core.git:reset-hard
+
+# Remove by command
+dcg allowlist remove --command "rm -rf ./build"
+```
+
+**Validating allowlist files:**
+
+```bash
+# Check for issues (expired entries, invalid patterns)
+dcg allowlist validate
+```
+
+**Pattern-based allowlisting (advanced):**
+
+For pattern-based allowlists using regex, you must acknowledge the risk:
+
+```bash
+# Allow any rm -rf on build directories (requires acknowledgement)
+dcg allowlist add --pattern "rm -rf .*/build" --reason "Build dirs" --risk-acknowledged
+```
+
+**Example allowlist.toml:**
+
+```toml
+[[allow]]
+rule = "core.git:reset-hard"
+reason = "Used for CI pipeline cleanup"
+added_at = "2026-01-08T12:00:00Z"
+
+[[allow]]
+command = "rm -rf ./build"
+reason = "Safe build directory cleanup"
+added_at = "2026-01-08T12:00:00Z"
+expires_at = "2026-02-08T12:00:00Z"  # Optional expiration
+
+[[allow]]
+pattern = "rm -rf .*/build"
+reason = "Build directories across projects"
+risk_acknowledged = true  # Required for pattern-based entries
+added_at = "2026-01-08T12:00:00Z"
+```
 
 ### Performance issues
 

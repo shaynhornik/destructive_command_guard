@@ -60,12 +60,8 @@ jobs:
       - name: Determine base ref
         id: base
         run: |
-          # Use PR base or fall back to default branch
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE_REF="${{ github.event.pull_request.base.sha }}"
-          else
-            BASE_REF="origin/${{ github.event.repository.default_branch }}"
-          fi
+          # Use PR base SHA for diff comparison
+          BASE_REF="${{ github.event.pull_request.base.sha }}"
           echo "ref=${BASE_REF}" >> $GITHUB_OUTPUT
           echo "Base ref: ${BASE_REF}"
 
@@ -75,15 +71,23 @@ jobs:
           set +e  # Don't exit on non-zero
 
           # Run scan and capture output
+          # Note: stdout goes to JSON file, stderr logged separately to avoid corrupting JSON
           ./target/release/dcg scan \
             --git-diff "${{ steps.base.outputs.ref }}...HEAD" \
             --format json \
             --fail-on error \
             --max-findings 50 \
             --truncate 200 \
-            > scan-results.json 2>&1
+            > scan-results.json 2>scan-stderr.log
 
           EXIT_CODE=$?
+
+          # Show any stderr output in the logs (for debugging)
+          if [ -s scan-stderr.log ]; then
+            echo "::group::dcg stderr output"
+            cat scan-stderr.log
+            echo "::endgroup::"
+          fi
           echo "exit_code=${EXIT_CODE}" >> $GITHUB_OUTPUT
 
           # Generate summary for GitHub Actions
@@ -124,8 +128,8 @@ jobs:
             echo "Scan output not available" >> $GITHUB_STEP_SUMMARY
           fi
 
-          # Exit with original code
-          exit ${EXIT_CODE}
+          # Don't exit with error here - let the "Check scan result" step handle failure
+          # This ensures artifact upload completes before job fails
 
       - name: Upload scan results
         if: always()
