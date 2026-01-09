@@ -21,9 +21,10 @@ use colored::Colorize;
 use destructive_command_guard::cli::{self, Cli};
 use destructive_command_guard::config::Config;
 use destructive_command_guard::evaluator::{
-    EvaluationDecision, MatchSource, evaluate_command_with_pack_order,
+    EvaluationDecision, MatchSource, evaluate_command_with_pack_order_deadline,
 };
 use destructive_command_guard::hook;
+use destructive_command_guard::perf::{Deadline, HOOK_EVALUATION_BUDGET};
 use destructive_command_guard::load_default_allowlists;
 use destructive_command_guard::packs::{DecisionMode, REGISTRY};
 #[cfg(test)]

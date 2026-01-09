@@ -357,6 +357,7 @@ const fn script_language_to_ast_lang(lang: ScriptLanguage) -> Option<SupportLang
         ScriptLanguage::Ruby => Some(SupportLang::Ruby),
         ScriptLanguage::Bash => Some(SupportLang::Bash),
         ScriptLanguage::Go => Some(SupportLang::Go),
+        ScriptLanguage::Php => Some(SupportLang::Php),
         ScriptLanguage::Perl | ScriptLanguage::Unknown => None,
     }
 }
@@ -1955,6 +1956,78 @@ fn default_patterns() -> HashMap<ScriptLanguage, Vec<CompiledPattern>> {
                 "exec.Command($$$).CombinedOutput()".to_string(),
                 "heredoc.go.exec_command_combined_output".to_string(),
                 "exec.Command().CombinedOutput() executes shell commands".to_string(),
+                Severity::Medium,
+                Some("Validate command arguments carefully".to_string()),
+            ),
+        ],
+    );
+
+    // PHP patterns
+    patterns.insert(
+        ScriptLanguage::Php,
+        vec![
+            // File/directory deletion
+            CompiledPattern::new(
+                "unlink($$$)".to_string(),
+                "heredoc.php.unlink".to_string(),
+                "unlink() deletes files".to_string(),
+                Severity::High,
+                None,
+            ),
+            CompiledPattern::new(
+                "rmdir($$$)".to_string(),
+                "heredoc.php.rmdir".to_string(),
+                "rmdir() deletes directories".to_string(),
+                Severity::High,
+                None,
+            ),
+            // Shell execution patterns
+            CompiledPattern::new(
+                "exec($$$)".to_string(),
+                "heredoc.php.exec".to_string(),
+                "exec() executes shell commands".to_string(),
+                Severity::Medium,
+                Some("Validate command arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "system($$$)".to_string(),
+                "heredoc.php.system".to_string(),
+                "system() executes shell commands".to_string(),
+                Severity::Medium,
+                Some("Validate command arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "shell_exec($$$)".to_string(),
+                "heredoc.php.shell_exec".to_string(),
+                "shell_exec() executes shell commands".to_string(),
+                Severity::Medium,
+                Some("Validate command arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "passthru($$$)".to_string(),
+                "heredoc.php.passthru".to_string(),
+                "passthru() executes shell commands".to_string(),
+                Severity::Medium,
+                Some("Validate command arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "proc_open($$$)".to_string(),
+                "heredoc.php.proc_open".to_string(),
+                "proc_open() executes shell commands".to_string(),
+                Severity::Medium,
+                Some("Validate command arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "popen($$$)".to_string(),
+                "heredoc.php.popen".to_string(),
+                "popen() executes shell commands".to_string(),
+                Severity::Medium,
+                Some("Validate command arguments carefully".to_string()),
+            ),
+            CompiledPattern::new(
+                "`$$$`".to_string(),
+                "heredoc.php.backticks".to_string(),
+                "Backticks execute shell commands in PHP".to_string(),
                 Severity::Medium,
                 Some("Validate command arguments carefully".to_string()),
             ),

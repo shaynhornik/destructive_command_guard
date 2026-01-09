@@ -239,19 +239,6 @@ impl EvaluationResult {
         }
     }
 
-    /// Create an "allowed" result due to budget timeout (fail-open).
-    #[inline]
-    #[must_use]
-    pub const fn allowed_due_to_budget() -> Self {
-        Self {
-            decision: EvaluationDecision::Allow,
-            pattern_info: None,
-            allowlist_override: None,
-            effective_mode: None,
-            skipped_due_to_budget: true,
-        }
-    }
-
     /// Create a "denied" result from config override.
     #[inline]
     #[must_use]
@@ -583,6 +570,7 @@ pub fn evaluate_command_with_pack_order(
                 allowlists,
                 heredoc_settings,
                 &mut heredoc_allowlist_hit,
+                None,
             ) {
                 return blocked;
             }
@@ -622,7 +610,7 @@ pub fn evaluate_command_with_pack_order(
     // "disable other packs" by stopping evaluation early. If a command matches multiple
     // packs/patterns, allowlisting the first match should still allow later matches to
     // deny the command.
-    let result = evaluate_packs_with_allowlists(&normalized, ordered_packs, allowlists);
+    let result = evaluate_packs_with_allowlists(&normalized, ordered_packs, allowlists, None);
     if result.allowlist_override.is_none() {
         if let Some((matched, layer, reason)) = heredoc_allowlist_hit {
             return EvaluationResult::allowed_by_allowlist(matched, layer, reason);
@@ -1056,6 +1044,7 @@ fn format_heredoc_denial_reason(
         crate::heredoc::ScriptLanguage::Perl => "perl",
         crate::heredoc::ScriptLanguage::JavaScript => "javascript",
         crate::heredoc::ScriptLanguage::TypeScript => "typescript",
+        crate::heredoc::ScriptLanguage::Php => "php",
         crate::heredoc::ScriptLanguage::Unknown => "unknown",
     };
 

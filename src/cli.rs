@@ -886,6 +886,7 @@ fn show_config(config: &Config) {
         match lang {
             crate::heredoc::ScriptLanguage::Bash => "bash",
             crate::heredoc::ScriptLanguage::Go => "go",
+            crate::heredoc::ScriptLanguage::Php => "php",
             crate::heredoc::ScriptLanguage::Python => "python",
             crate::heredoc::ScriptLanguage::Ruby => "ruby",
             crate::heredoc::ScriptLanguage::Perl => "perl",
