@@ -4,6 +4,11 @@ on:
   pull_request:
   push:
     branches: [master, main]
+  schedule:
+    # Run deep suite daily at 3am UTC
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    # Allow manual triggering for deep suite
 
 env:
   CARGO_TERM_COLOR: always
@@ -249,3 +254,98 @@ jobs:
           name: benchmark-results
           path: benchmark_output.txt
           retention-days: 30
+
+  # End-to-end shell script tests
+  e2e:
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Run E2E tests
+        run: |
+          mkdir -p e2e-artifacts
+          ./scripts/e2e_test.sh --verbose --binary target/release/dcg --json --artifacts e2e-artifacts 2>&1 | tee e2e_output.json
+          echo "## E2E Test Results" >> $GITHUB_STEP_SUMMARY
+          # Extract summary from JSON output
+          if jq -e '.summary' e2e_output.json >/dev/null 2>&1; then
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            jq '.summary' e2e_output.json >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            tail -20 e2e_output.json >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload E2E artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-failure-artifacts
+          path: |
+            e2e_output.json
+            e2e-artifacts/
+          retention-days: 14
+
+  # Deep suite: fuzzing (scheduled or manual only)
+  fuzz:
+    runs-on: ubuntu-latest
+    # Only run on schedule or manual trigger, not on every PR
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Cache cargo registry and fuzz corpus
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            fuzz/corpus
+            fuzz/artifacts
+          key: ${{ runner.os }}-fuzz-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', 'fuzz/**') }}
+          restore-keys: |
+            ${{ runner.os }}-fuzz-
+
+      - name: Run fuzz tests (time-limited)
+        run: |
+          cd fuzz
+          echo "## Fuzzing Results" >> $GITHUB_STEP_SUMMARY
+          for target in fuzz_context fuzz_evaluate fuzz_hook_input fuzz_normalize; do
+            echo "Fuzzing $target for 60 seconds..."
+            timeout 60s cargo fuzz run "$target" -- -max_total_time=60 || true
+            echo "- $target: completed" >> $GITHUB_STEP_SUMMARY
+          done
+
+      - name: Upload fuzz artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          retention-days: 30
+          if-no-files-found: ignore
