@@ -204,8 +204,16 @@ pub struct HeredocConfig {
     ///
     /// Values are case-insensitive and may include aliases:
     /// - bash: bash, sh, shell
+    /// - python: python, py
+    /// - ruby: ruby, rb
+    /// - perl: perl, pl
     /// - javascript: javascript, js, node
     /// - typescript: typescript, ts
+    /// - php: php
+    /// - go: go, golang
+    /// - unknown: unknown
+    ///
+    /// Special value "all" scans all languages (the default if omitted).
     pub languages: Option<Vec<String>>,
 
     /// Fail-open when AST parsing fails for embedded code.
@@ -360,13 +368,15 @@ impl HeredocConfig {
 
                 let lang = match raw.to_ascii_lowercase().as_str() {
                     "bash" | "sh" | "shell" => Some(crate::heredoc::ScriptLanguage::Bash),
-                    "python" => Some(crate::heredoc::ScriptLanguage::Python),
-                    "ruby" => Some(crate::heredoc::ScriptLanguage::Ruby),
-                    "perl" => Some(crate::heredoc::ScriptLanguage::Perl),
+                    "python" | "py" => Some(crate::heredoc::ScriptLanguage::Python),
+                    "ruby" | "rb" => Some(crate::heredoc::ScriptLanguage::Ruby),
+                    "perl" | "pl" => Some(crate::heredoc::ScriptLanguage::Perl),
                     "javascript" | "js" | "node" => {
                         Some(crate::heredoc::ScriptLanguage::JavaScript)
                     }
                     "typescript" | "ts" => Some(crate::heredoc::ScriptLanguage::TypeScript),
+                    "php" => Some(crate::heredoc::ScriptLanguage::Php),
+                    "go" | "golang" => Some(crate::heredoc::ScriptLanguage::Go),
                     "unknown" => Some(crate::heredoc::ScriptLanguage::Unknown),
                     _ => None,
                 };
@@ -569,7 +579,7 @@ fn language_filter_matches(filter: &str, language: crate::heredoc::ScriptLanguag
         Python => matches!(filter_lower.as_str(), "python" | "py"),
         Ruby => matches!(filter_lower.as_str(), "ruby" | "rb"),
         Perl => matches!(filter_lower.as_str(), "perl" | "pl"),
-        JavaScript => matches!(filter_lower.as_str(), "javascript" | "js"),
+        JavaScript => matches!(filter_lower.as_str(), "javascript" | "js" | "node"),
         TypeScript => matches!(filter_lower.as_str(), "typescript" | "ts"),
         Php => matches!(filter_lower.as_str(), "php"),
         Go => matches!(filter_lower.as_str(), "go" | "golang"),
@@ -2815,6 +2825,11 @@ allow = false
                     pattern: "interface".to_string(),
                     reason: "TS interface".to_string(),
                 },
+                AllowedHeredocPattern {
+                    language: Some("node".to_string()), // alias for javascript
+                    pattern: "require(".to_string(),
+                    reason: "Node require".to_string(),
+                },
             ],
             ..Default::default()
         };
@@ -2850,6 +2865,14 @@ allow = false
             None,
         );
         assert!(hit.is_some(), "ts alias should match TypeScript");
+
+        // "node" should match JavaScript
+        let hit = allowlist.is_content_allowlisted(
+            "const fs = require('fs')",
+            crate::heredoc::ScriptLanguage::JavaScript,
+            None,
+        );
+        assert!(hit.is_some(), "node alias should match JavaScript");
 
         // "js" should NOT match Python
         let hit = allowlist.is_content_allowlisted(
