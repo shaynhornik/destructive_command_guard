@@ -139,7 +139,7 @@ pub fn format_denial_message(command: &str, reason: &str) -> String {
 
 /// Print a colorful warning to stderr for human visibility.
 #[allow(clippy::too_many_lines)]
-pub fn print_colorful_warning(command: &str, reason: &str, pack: Option<&str>) {
+pub fn print_colorful_warning(command: &str, reason: &str, pack: Option<&str>, pattern: Option<&str>) {
     // Box width (content area, excluding border characters)
     const WIDTH: usize = 70;
 
@@ -187,8 +187,27 @@ pub fn print_colorful_warning(command: &str, reason: &str, pack: Option<&str>) {
         "┤".red()
     );
 
-    // Pack info if available
-    if let Some(pack_name) = pack {
+    // Build rule_id from pack and pattern (for registry lookup and display)
+    let rule_id = match (pack, pattern) {
+        (Some(p), Some(pat)) => Some(format!("{p}:{pat}")),
+        _ => None,
+    };
+
+    // Rule ID (stable identifier for allowlisting)
+    if let Some(ref rule) = rule_id {
+        let rule_line = format!("  Rule: {rule}");
+        let padding = WIDTH.saturating_sub(rule_line.len());
+        let _ = write!(handle, "{}", "│".red());
+        let _ = write!(handle, "  {} ", "Rule:".bright_black());
+        let _ = write!(handle, "{}", rule.yellow());
+        let _ = writeln!(
+            handle,
+            "{}{}",
+            " ".repeat(padding.saturating_sub(2)),
+            "│".red()
+        );
+    } else if let Some(pack_name) = pack {
+        // Fallback: show pack if no rule_id
         let pack_line = format!("  Pack: {pack_name}");
         let padding = WIDTH.saturating_sub(pack_line.len());
         let _ = write!(handle, "{}", "│".red());
@@ -246,7 +265,7 @@ pub fn print_colorful_warning(command: &str, reason: &str, pack: Option<&str>) {
     let padding = WIDTH.saturating_sub(cmd_line_len);
     let _ = writeln!(handle, "{}{}", " ".repeat(padding), "│".red());
 
-    // Separator before help
+    // Separator before suggestions/help
     let _ = writeln!(
         handle,
         "{}{}{}",
@@ -255,17 +274,93 @@ pub fn print_colorful_warning(command: &str, reason: &str, pack: Option<&str>) {
         "┤".red()
     );
 
-    // Help section with lightbulb icon
-    let tip_text = "Run this command manually in a terminal if needed.";
-    let tip_line_len = "     ".len() + tip_text.len();
-    let _ = write!(handle, "{}", "│".red());
-    let _ = write!(handle, "  💡 ");
-    let _ = write!(handle, "{}", tip_text.bright_black());
-    let padding = WIDTH.saturating_sub(tip_line_len);
-    let _ = writeln!(handle, "{}{}", " ".repeat(padding), "│".red());
+    // Suggestions from registry (if available) or fallback to contextual
+    let suggestions = rule_id
+        .as_deref()
+        .and_then(crate::suggestions::get_suggestions);
 
-    // Context-specific suggestions
-    print_contextual_suggestion_boxed(&mut handle, command, WIDTH);
+    if let Some(sugg_list) = suggestions {
+        // Show up to 3 suggestions from registry
+        for s in sugg_list.iter().take(3) {
+            let kind_label = s.kind.label();
+            let _ = write!(handle, "{}", "│".red());
+            let _ = write!(handle, "  💡 {} ", kind_label.green());
+            // Truncate suggestion text if too long
+            let max_text = WIDTH.saturating_sub(kind_label.len() + 8);
+            let text = truncate_for_display(&s.text, max_text);
+            let _ = write!(handle, "{}", text.white());
+            let line_len = 5 + kind_label.len() + 1 + text.len();
+            let padding = WIDTH.saturating_sub(line_len);
+            let _ = writeln!(handle, "{}{}", " ".repeat(padding), "│".red());
+
+            // Show command if available
+            if let Some(ref cmd) = s.command {
+                let _ = write!(handle, "{}", "│".red());
+                let _ = write!(handle, "     {} ", "$".bright_black());
+                let max_cmd = WIDTH.saturating_sub(10);
+                let cmd_display = truncate_for_display(cmd, max_cmd);
+                let _ = write!(handle, "{}", cmd_display.cyan());
+                let cmd_line_len = 7 + cmd_display.len();
+                let cmd_padding = WIDTH.saturating_sub(cmd_line_len);
+                let _ = writeln!(handle, "{}{}", " ".repeat(cmd_padding), "│".red());
+            }
+        }
+    } else {
+        // Fallback to contextual suggestion if no registry entry
+        print_contextual_suggestion_boxed(&mut handle, command, WIDTH);
+    }
+
+    // Empty line before learning commands
+    let _ = writeln!(handle, "{}{}{}", "│".red(), " ".repeat(WIDTH), "│".red());
+
+    // Learning commands separator
+    let _ = writeln!(
+        handle,
+        "{}{}{}",
+        "├".red(),
+        "─".repeat(WIDTH).red().dimmed(),
+        "┤".red()
+    );
+
+    // Copy/paste learning commands
+    let _ = write!(handle, "{}", "│".red());
+    let _ = write!(handle, "  {} ", "Learn more:".bright_black());
+    let learn_len = "  Learn more: ".len();
+    let _ = writeln!(
+        handle,
+        "{}{}",
+        " ".repeat(WIDTH.saturating_sub(learn_len)),
+        "│".red()
+    );
+
+    // dcg explain command
+    let escaped_cmd = command.replace('\'', "'\\''");
+    let explain_cmd = format!("dcg explain '{}'", truncate_for_display(&escaped_cmd, 45));
+    let _ = write!(handle, "{}", "│".red());
+    let _ = write!(handle, "     {} ", "$".bright_black());
+    let _ = write!(handle, "{}", explain_cmd.cyan());
+    let explain_len = 7 + explain_cmd.len();
+    let _ = writeln!(
+        handle,
+        "{}{}",
+        " ".repeat(WIDTH.saturating_sub(explain_len)),
+        "│".red()
+    );
+
+    // dcg allowlist add command (if we have a rule_id)
+    if let Some(ref rule) = rule_id {
+        let allowlist_cmd = format!("dcg allowlist add {} --project", rule);
+        let _ = write!(handle, "{}", "│".red());
+        let _ = write!(handle, "     {} ", "$".bright_black());
+        let _ = write!(handle, "{}", allowlist_cmd.cyan());
+        let allowlist_len = 7 + allowlist_cmd.len();
+        let _ = writeln!(
+            handle,
+            "{}{}",
+            " ".repeat(WIDTH.saturating_sub(allowlist_len)),
+            "│".red()
+        );
+    }
 
     // Bottom border with corners
     let _ = writeln!(
@@ -276,6 +371,23 @@ pub fn print_colorful_warning(command: &str, reason: &str, pack: Option<&str>) {
         "╯".red()
     );
     let _ = writeln!(handle);
+}
+
+/// Truncate a string for display, appending "..." if truncated.
+fn truncate_for_display(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        // Find a safe UTF-8 boundary for truncation
+        let target = max_len.saturating_sub(3);
+        let boundary = s
+            .char_indices()
+            .take_while(|(i, _)| *i < target)
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        format!("{}...", &s[..boundary])
+    }
 }
 
 /// Wrap text to fit within a given width.
@@ -343,9 +455,9 @@ fn print_contextual_suggestion_boxed(handle: &mut io::StderrLock<'_>, command: &
 /// Output a denial response to stdout (JSON for hook protocol).
 #[cold]
 #[inline(never)]
-pub fn output_denial(command: &str, reason: &str, pack: Option<&str>) {
+pub fn output_denial(command: &str, reason: &str, pack: Option<&str>, pattern: Option<&str>) {
     // Print colorful warning to stderr (visible to user)
-    print_colorful_warning(command, reason, pack);
+    print_colorful_warning(command, reason, pack, pattern);
 
     // Build JSON response for hook protocol (stdout)
     let message = format_denial_message(command, reason);
@@ -368,7 +480,7 @@ pub fn output_denial(command: &str, reason: &str, pack: Option<&str>) {
 /// Output a warning to stderr (no JSON deny; command is allowed).
 #[cold]
 #[inline(never)]
-pub fn output_warning(command: &str, reason: &str, pack: Option<&str>) {
+pub fn output_warning(command: &str, reason: &str, pack: Option<&str>, pattern: Option<&str>) {
     let stderr = io::stderr();
     let mut handle = stderr.lock();
 
@@ -380,7 +492,15 @@ pub fn output_warning(command: &str, reason: &str, pack: Option<&str>) {
         reason
     );
 
-    if let Some(pack_name) = pack {
+    // Build rule_id from pack and pattern
+    let rule_id = match (pack, pattern) {
+        (Some(p), Some(pat)) => Some(format!("{p}:{pat}")),
+        _ => None,
+    };
+
+    if let Some(ref rule) = rule_id {
+        let _ = writeln!(handle, "  {} {}", "Rule:".bright_black(), rule);
+    } else if let Some(pack_name) = pack {
         let _ = writeln!(handle, "  {} {}", "Pack:".bright_black(), pack_name);
     }
 
@@ -558,7 +678,7 @@ mod tests {
             "Chinese test string must be >50 chars, got {}",
             long_chinese.chars().count()
         );
-        print_colorful_warning(long_chinese, "test reason", Some("test.pack"));
+        print_colorful_warning(long_chinese, "test reason", Some("test.pack"), None);
 
         // Japanese characters - also >50 chars
         let long_japanese = "rm -rf /home/ユーザー/ドキュメント/フォルダ/サブフォルダ/ファイル/もっとフォルダ/最後/追加パス";
@@ -567,7 +687,7 @@ mod tests {
             "Japanese test string must be >50 chars, got {}",
             long_japanese.chars().count()
         );
-        print_colorful_warning(long_japanese, "test reason", None);
+        print_colorful_warning(long_japanese, "test reason", None, None);
 
         // Mixed ASCII and emoji (emoji are 4 bytes) - >50 chars
         let long_emoji = "echo 🎉🎊🎈🎁🎀🎄🎃🎂🎆🎇🧨✨🎍🎎🎏🎐🎑🧧🎀🎁🎗🎟🎫🎖🏆🏅🥇🥈🥉⚽️🏀🏈⚾️🥎🎾🏐🏉🥏🎱🪀🏓🏸🥊🥋";
@@ -576,6 +696,6 @@ mod tests {
             "Emoji test string must be >50 chars, got {}",
             long_emoji.chars().count()
         );
-        print_colorful_warning(long_emoji, "test reason", Some("emoji.pack"));
+        print_colorful_warning(long_emoji, "test reason", Some("emoji.pack"), None);
     }
 }

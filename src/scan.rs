@@ -35,7 +35,7 @@ use crate::packs::{DecisionMode, REGISTRY, Severity};
 use crate::suggestions::{SuggestionKind, get_suggestion_by_kind};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub const SCAN_SCHEMA_VERSION: u32 = 1;
@@ -572,6 +572,7 @@ fn redact_token(token: &str) -> String {
 /// - Shell-script extractor (`*.sh`)
 /// - Dockerfile extractor (`Dockerfile`, `*.dockerfile`, `Dockerfile.*`)
 /// - GitHub Actions workflow extractor (`.github/workflows/*.yml|*.yaml`)
+/// - GitLab CI extractor (`.gitlab-ci.yml`, `*.gitlab-ci.yml`)
 /// - Makefile extractor (`Makefile`)
 #[allow(clippy::missing_errors_doc)]
 pub fn scan_paths(
@@ -621,9 +622,10 @@ pub fn scan_paths(
         let is_shell = is_shell_script_path(file);
         let is_docker = is_dockerfile_path(file);
         let is_actions = is_github_actions_workflow_path(file);
+        let is_gitlab = is_gitlab_ci_path(file);
         let is_makefile = is_makefile_path(file);
 
-        if !is_shell && !is_docker && !is_actions && !is_makefile {
+        if !is_shell && !is_docker && !is_actions && !is_gitlab && !is_makefile {
             files_skipped += 1;
             continue;
         }
@@ -658,6 +660,14 @@ pub fn scan_paths(
 
         if is_actions {
             extracted.extend(extract_github_actions_workflow_from_str(
+                &file_label,
+                &content,
+                &ctx.enabled_keywords,
+            ));
+        }
+
+        if is_gitlab {
+            extracted.extend(extract_gitlab_ci_from_str(
                 &file_label,
                 &content,
                 &ctx.enabled_keywords,
@@ -1308,6 +1318,344 @@ fn extract_github_actions_workflow_from_str(
     }
 
     out
+}
+
+// ============================================================================
+// GitLab CI extractor (.gitlab-ci.yml, *.gitlab-ci.yml)
+// ============================================================================
+
+fn is_gitlab_ci_path(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(std::ffi::OsStr::to_str) else {
+        return false;
+    };
+    let lower = file_name.to_ascii_lowercase();
+    lower == ".gitlab-ci.yml" || lower.ends_with(".gitlab-ci.yml")
+}
+
+fn extract_gitlab_ci_from_str(
+    file: &str,
+    content: &str,
+    enabled_keywords: &[&'static str],
+) -> Vec<ExtractedCommand> {
+    const EXTRACTOR_ID: &str = "gitlab_ci.script";
+
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out = Vec::new();
+    let mut anchors: HashMap<String, Vec<ExtractedCommand>> = HashMap::new();
+    let mut skip_indent: Option<usize> = None;
+
+    let mut idx = 0usize;
+    while idx < lines.len() {
+        let line_no = idx + 1;
+        let raw_line = lines[idx];
+        let trimmed_start = raw_line.trim_start();
+
+        if trimmed_start.is_empty() || trimmed_start.starts_with('#') {
+            idx += 1;
+            continue;
+        }
+
+        let indent = raw_line.len() - trimmed_start.len();
+
+        if let Some(skip) = skip_indent {
+            if indent <= skip {
+                skip_indent = None;
+            } else {
+                idx += 1;
+                continue;
+            }
+        }
+
+        if yaml_key_value(trimmed_start, "variables").is_some()
+            || yaml_key_value(trimmed_start, "rules").is_some()
+            || yaml_key_value(trimmed_start, "only").is_some()
+            || yaml_key_value(trimmed_start, "except").is_some()
+        {
+            skip_indent = Some(indent);
+            idx += 1;
+            continue;
+        }
+
+        if let Some(value) = yaml_key_value(trimmed_start, "before_script")
+            .or_else(|| yaml_key_value(trimmed_start, "script"))
+            .or_else(|| yaml_key_value(trimmed_start, "after_script"))
+        {
+            if let Some((anchor_name, _remainder)) = parse_yaml_anchor(value, '&') {
+                let (commands, next_idx) = extract_gitlab_sequence_items(
+                    file,
+                    &lines,
+                    idx + 1,
+                    indent,
+                    enabled_keywords,
+                    EXTRACTOR_ID,
+                    &mut anchors,
+                );
+                anchors.insert(anchor_name, commands.clone());
+                out.extend(commands);
+                idx = next_idx;
+                continue;
+            }
+
+            if let Some((alias_name, _)) = parse_yaml_anchor(value, '*') {
+                if let Some(anchored) = anchors.get(&alias_name) {
+                    out.extend(anchored.iter().cloned());
+                }
+                idx += 1;
+                continue;
+            }
+
+            if value.starts_with('|') || value.starts_with('>') {
+                let (block, block_start_line, next_idx) = parse_yaml_block(&lines, idx + 1, indent);
+                out.extend(extract_shell_script_with_offset_and_id(
+                    file,
+                    block_start_line,
+                    &block,
+                    enabled_keywords,
+                    EXTRACTOR_ID,
+                ));
+                idx = next_idx;
+                continue;
+            }
+
+            if let Some(items) = parse_inline_yaml_sequence(value) {
+                for item in items {
+                    out.extend(extract_shell_script_with_offset_and_id(
+                        file,
+                        line_no,
+                        &item,
+                        enabled_keywords,
+                        EXTRACTOR_ID,
+                    ));
+                }
+                idx += 1;
+                continue;
+            }
+
+            if value.is_empty() || value.starts_with('#') {
+                let (commands, next_idx) = extract_gitlab_sequence_items(
+                    file,
+                    &lines,
+                    idx + 1,
+                    indent,
+                    enabled_keywords,
+                    EXTRACTOR_ID,
+                    &mut anchors,
+                );
+                out.extend(commands);
+                idx = next_idx;
+                continue;
+            }
+
+            out.extend(extract_shell_script_with_offset_and_id(
+                file,
+                line_no,
+                value,
+                enabled_keywords,
+                EXTRACTOR_ID,
+            ));
+
+            idx += 1;
+            continue;
+        }
+
+        if let Some(anchor_name) = gitlab_anchor_definition(trimmed_start) {
+            let (commands, next_idx) = extract_gitlab_sequence_items(
+                file,
+                &lines,
+                idx + 1,
+                indent,
+                enabled_keywords,
+                EXTRACTOR_ID,
+                &mut anchors,
+            );
+
+            if !commands.is_empty() {
+                anchors.insert(anchor_name, commands);
+                idx = next_idx;
+                continue;
+            }
+        }
+
+        idx += 1;
+    }
+
+    out
+}
+
+fn gitlab_anchor_definition(line: &str) -> Option<String> {
+    let Some((_, rest)) = line.split_once(':') else {
+        return None;
+    };
+    let rest = rest.trim_start();
+    let (anchor_name, remainder) = parse_yaml_anchor(rest, '&')?;
+    if remainder.is_empty() || remainder.starts_with('#') {
+        return Some(anchor_name);
+    }
+    None
+}
+
+fn extract_gitlab_sequence_items(
+    file: &str,
+    lines: &[&str],
+    start_idx: usize,
+    parent_indent: usize,
+    enabled_keywords: &[&'static str],
+    extractor_id: &'static str,
+    anchors: &mut HashMap<String, Vec<ExtractedCommand>>,
+) -> (Vec<ExtractedCommand>, usize) {
+    let mut out = Vec::new();
+    let mut idx = start_idx;
+
+    while idx < lines.len() {
+        let line_no = idx + 1;
+        let raw_line = lines[idx];
+        let trimmed_start = raw_line.trim_start();
+
+        if trimmed_start.is_empty() || trimmed_start.starts_with('#') {
+            idx += 1;
+            continue;
+        }
+
+        let indent = raw_line.len() - trimmed_start.len();
+        if indent <= parent_indent {
+            break;
+        }
+
+        if !trimmed_start.starts_with('-') {
+            idx += 1;
+            continue;
+        }
+
+        let item_indent = indent;
+        let mut item_value = trimmed_start.trim_start_matches('-').trim_start();
+        let mut anchor_name: Option<String> = None;
+
+        if let Some((anchor, remainder)) = parse_yaml_anchor(item_value, '&') {
+            anchor_name = Some(anchor);
+            item_value = remainder;
+        }
+
+        if let Some((alias_name, _)) = parse_yaml_anchor(item_value, '*') {
+            if let Some(anchored) = anchors.get(&alias_name) {
+                out.extend(anchored.iter().cloned());
+            }
+            idx += 1;
+            continue;
+        }
+
+        if item_value.starts_with('|') || item_value.starts_with('>') {
+            let (block, block_start_line, next_idx) = parse_yaml_block(
+                lines,
+                idx + 1,
+                item_indent,
+            );
+            let extracted = extract_shell_script_with_offset_and_id(
+                file,
+                block_start_line,
+                &block,
+                enabled_keywords,
+                extractor_id,
+            );
+            if let Some(anchor) = anchor_name {
+                anchors.insert(anchor, extracted.clone());
+            }
+            out.extend(extracted);
+            idx = next_idx;
+            continue;
+        }
+
+        if !item_value.is_empty() && !item_value.starts_with('#') {
+            let extracted = extract_shell_script_with_offset_and_id(
+                file,
+                line_no,
+                item_value,
+                enabled_keywords,
+                extractor_id,
+            );
+            if let Some(anchor) = anchor_name {
+                anchors.insert(anchor, extracted.clone());
+            }
+            out.extend(extracted);
+        }
+
+        idx += 1;
+    }
+
+    (out, idx)
+}
+
+fn parse_yaml_block(
+    lines: &[&str],
+    start_idx: usize,
+    parent_indent: usize,
+) -> (String, usize, usize) {
+    let block_start_line = start_idx + 1;
+    let mut block = String::new();
+    let mut idx = start_idx;
+
+    while idx < lines.len() {
+        let raw = lines[idx];
+        let trimmed = raw.trim_start();
+
+        if !trimmed.is_empty() {
+            let indent = raw.len() - trimmed.len();
+            if indent <= parent_indent {
+                break;
+            }
+        }
+
+        if !block.is_empty() {
+            block.push('\n');
+        }
+        block.push_str(raw);
+        idx += 1;
+    }
+
+    (block, block_start_line, idx)
+}
+
+fn parse_inline_yaml_sequence(value: &str) -> Option<Vec<String>> {
+    let trimmed = value.trim();
+    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+        return None;
+    }
+    let inner = trimmed.trim_start_matches('[').trim_end_matches(']');
+    let mut out = Vec::new();
+
+    for part in inner.split(',') {
+        let item = part.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let unquoted = item.trim_matches(&['"', '\''][..]);
+        if !unquoted.is_empty() {
+            out.push(unquoted.to_string());
+        }
+    }
+
+    Some(out)
+}
+
+fn parse_yaml_anchor(value: &str, prefix: char) -> Option<(String, &str)> {
+    let trimmed = value.trim_start();
+    let rest = trimmed.strip_prefix(prefix)?;
+    let mut name = String::new();
+    let mut chars = rest.chars();
+
+    while let Some(ch) = chars.next() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+            name.push(ch);
+        } else {
+            break;
+        }
+    }
+
+    if name.is_empty() {
+        return None;
+    }
+
+    let remainder = &rest[name.len()..];
+    Some((name, remainder.trim_start()))
 }
 
 fn yaml_key_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
@@ -2402,6 +2750,61 @@ jobs:
         let extracted =
             extract_github_actions_workflow_from_str(".github/workflows/ci.yml", content, &["rm"]);
         assert!(extracted.is_empty());
+    }
+
+    // ========================================================================
+    // GitLab CI extractor tests (git_safety_guard-ehc)
+    // ========================================================================
+
+    #[test]
+    fn gitlab_ci_path_detection() {
+        use std::path::Path;
+        assert!(is_gitlab_ci_path(Path::new(".gitlab-ci.yml")));
+        assert!(is_gitlab_ci_path(Path::new("foo.gitlab-ci.yml")));
+        assert!(is_gitlab_ci_path(Path::new("FOO.GITLAB-CI.YML")));
+        assert!(!is_gitlab_ci_path(Path::new("gitlab-ci.yml")));
+        assert!(!is_gitlab_ci_path(Path::new(".gitlab-ci.yaml")));
+    }
+
+    #[test]
+    fn gitlab_ci_extractor_extracts_script_sections_only() {
+        let content = r#"before_script:
+  - echo "before"
+build:
+  script:
+    - echo "build"
+  after_script:
+    - rm -rf ./build
+variables:
+  DANGEROUS: "rm -rf /"
+"#;
+
+        let extracted = extract_gitlab_ci_from_str(".gitlab-ci.yml", content, &["rm", "echo"]);
+        assert_eq!(extracted.len(), 3);
+        assert_eq!(extracted[0].line, 2);
+        assert_eq!(extracted[0].extractor_id, "gitlab_ci.script");
+        assert_eq!(extracted[0].command, "echo \"before\"");
+        assert_eq!(extracted[1].line, 5);
+        assert_eq!(extracted[1].command, "echo \"build\"");
+        assert_eq!(extracted[2].line, 7);
+        assert_eq!(extracted[2].command, "rm -rf ./build");
+    }
+
+    #[test]
+    fn gitlab_ci_extractor_handles_anchor_alias() {
+        let content = r#".common_script: &common_script
+  - echo "one"
+  - rm -rf ./build
+deploy:
+  script: *common_script
+"#;
+
+        let extracted = extract_gitlab_ci_from_str(".gitlab-ci.yml", content, &["rm", "echo"]);
+        assert_eq!(extracted.len(), 2);
+        assert_eq!(extracted[0].line, 2);
+        assert_eq!(extracted[0].command, "echo \"one\"");
+        assert_eq!(extracted[1].line, 3);
+        assert_eq!(extracted[1].command, "rm -rf ./build");
     }
 
     // ========================================================================

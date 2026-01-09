@@ -317,7 +317,12 @@ impl HeredocAllowlistConfig {
         if let Some(path) = project_path {
             for project in &self.projects {
                 let project_path_str = path.to_string_lossy();
-                if project_path_str.starts_with(&project.path) {
+                // Match exact path or path with separator to avoid false positives
+                // e.g., "/home/user/project" should not match "/home/user/project-other"
+                let is_match = project_path_str == project.path
+                    || project_path_str.starts_with(&format!("{}/", project.path))
+                    || project_path_str.starts_with(&format!("{}\\", project.path));
+                if is_match {
                     // Check project content hashes
                     for entry in &project.content_hashes {
                         if entry.hash == hash {
@@ -412,8 +417,7 @@ fn pattern_matches(
 ) -> bool {
     // Check language filter
     if let Some(lang_filter) = &pattern.language {
-        let lang_str = language_to_string(language);
-        if !lang_filter.eq_ignore_ascii_case(lang_str) {
+        if !language_filter_matches(lang_filter, language) {
             return false;
         }
     }
@@ -421,26 +425,41 @@ fn pattern_matches(
     content.contains(&pattern.pattern)
 }
 
-/// Convert `ScriptLanguage` to string for matching.
-const fn language_to_string(lang: crate::heredoc::ScriptLanguage) -> &'static str {
-    match lang {
-        crate::heredoc::ScriptLanguage::Bash => "bash",
-        crate::heredoc::ScriptLanguage::Python => "python",
-        crate::heredoc::ScriptLanguage::Ruby => "ruby",
-        crate::heredoc::ScriptLanguage::Perl => "perl",
-        crate::heredoc::ScriptLanguage::JavaScript => "javascript",
-        crate::heredoc::ScriptLanguage::TypeScript => "typescript",
-        crate::heredoc::ScriptLanguage::Php => "php",
-        crate::heredoc::ScriptLanguage::Go => "go",
-        crate::heredoc::ScriptLanguage::Unknown => "unknown",
+/// Check if a language filter string matches the given language.
+/// Supports both full names (e.g., "javascript") and common aliases (e.g., "js").
+fn language_filter_matches(filter: &str, language: crate::heredoc::ScriptLanguage) -> bool {
+    use crate::heredoc::ScriptLanguage::*;
+    let filter_lower = filter.to_ascii_lowercase();
+
+    match language {
+        Bash => matches!(filter_lower.as_str(), "bash" | "sh" | "shell"),
+        Python => matches!(filter_lower.as_str(), "python" | "py"),
+        Ruby => matches!(filter_lower.as_str(), "ruby" | "rb"),
+        Perl => matches!(filter_lower.as_str(), "perl" | "pl"),
+        JavaScript => matches!(filter_lower.as_str(), "javascript" | "js"),
+        TypeScript => matches!(filter_lower.as_str(), "typescript" | "ts"),
+        Php => matches!(filter_lower.as_str(), "php"),
+        Go => matches!(filter_lower.as_str(), "go" | "golang"),
+        Unknown => filter_lower == "unknown",
     }
 }
 
-/// Compute a simple hash of content (for allowlisting).
+/// Compute a content hash for allowlisting.
 ///
-/// Note: This uses the standard library's `DefaultHasher` for simplicity.
-/// For security-critical applications, consider using SHA-256.
-fn sha256_hex(content: &str) -> String {
+/// # Stability Warning
+///
+/// This uses Rust's `DefaultHasher` (SipHash-1-3) which is:
+/// - **Deterministic** within the same Rust version and platform
+/// - **NOT guaranteed stable** across different Rust versions
+///
+/// If you update the Rust compiler, previously configured content hashes may
+/// stop matching. For production use with long-term stability requirements,
+/// consider a stable hash algorithm like SHA-256 or xxHash.
+///
+/// # Returns
+///
+/// A 16-character hex string representing the 64-bit hash.
+fn content_hash(content: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
@@ -2387,5 +2406,124 @@ mod tests {
         assert!(settings.content_allowlist.is_some());
         let allowlist = settings.content_allowlist.unwrap();
         assert_eq!(allowlist.commands.len(), 1);
+    }
+
+    #[test]
+    fn test_heredoc_allowlist_project_path_no_false_positive() {
+        // Regression test: "/home/user/project" should NOT match "/home/user/project-other"
+        let allowlist = HeredocAllowlistConfig {
+            projects: vec![ProjectHeredocAllowlist {
+                path: "/home/user/project".to_string(),
+                patterns: vec![AllowedHeredocPattern {
+                    language: Some("bash".to_string()),
+                    pattern: "dangerous command".to_string(),
+                    reason: "Test".to_string(),
+                }],
+                content_hashes: vec![],
+            }],
+            ..Default::default()
+        };
+
+        // Should NOT match: project-other is a different project
+        let hit = allowlist.is_content_allowlisted(
+            "dangerous command",
+            crate::heredoc::ScriptLanguage::Bash,
+            Some(std::path::Path::new("/home/user/project-other/src")),
+        );
+        assert!(hit.is_none(), "Should not match project-other");
+
+        // Should NOT match: projects is a different project
+        let hit = allowlist.is_content_allowlisted(
+            "dangerous command",
+            crate::heredoc::ScriptLanguage::Bash,
+            Some(std::path::Path::new("/home/user/projects/src")),
+        );
+        assert!(hit.is_none(), "Should not match 'projects'");
+
+        // SHOULD match: exact path
+        let hit = allowlist.is_content_allowlisted(
+            "dangerous command",
+            crate::heredoc::ScriptLanguage::Bash,
+            Some(std::path::Path::new("/home/user/project")),
+        );
+        assert!(hit.is_some(), "Should match exact path");
+
+        // SHOULD match: subdirectory of project
+        let hit = allowlist.is_content_allowlisted(
+            "dangerous command",
+            crate::heredoc::ScriptLanguage::Bash,
+            Some(std::path::Path::new("/home/user/project/src/lib")),
+        );
+        assert!(hit.is_some(), "Should match subdirectory");
+    }
+
+    #[test]
+    fn test_heredoc_allowlist_language_aliases() {
+        // Test that language aliases like "js", "sh", "py" work
+        let allowlist = HeredocAllowlistConfig {
+            patterns: vec![
+                AllowedHeredocPattern {
+                    language: Some("js".to_string()), // alias for javascript
+                    pattern: "console.log".to_string(),
+                    reason: "JS logging".to_string(),
+                },
+                AllowedHeredocPattern {
+                    language: Some("sh".to_string()), // alias for bash
+                    pattern: "echo hello".to_string(),
+                    reason: "Shell echo".to_string(),
+                },
+                AllowedHeredocPattern {
+                    language: Some("py".to_string()), // alias for python
+                    pattern: "print".to_string(),
+                    reason: "Python print".to_string(),
+                },
+                AllowedHeredocPattern {
+                    language: Some("ts".to_string()), // alias for typescript
+                    pattern: "interface".to_string(),
+                    reason: "TS interface".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        // "js" should match JavaScript
+        let hit = allowlist.is_content_allowlisted(
+            "console.log('hello')",
+            crate::heredoc::ScriptLanguage::JavaScript,
+            None,
+        );
+        assert!(hit.is_some(), "js alias should match JavaScript");
+
+        // "sh" should match Bash
+        let hit = allowlist.is_content_allowlisted(
+            "echo hello",
+            crate::heredoc::ScriptLanguage::Bash,
+            None,
+        );
+        assert!(hit.is_some(), "sh alias should match Bash");
+
+        // "py" should match Python
+        let hit = allowlist.is_content_allowlisted(
+            "print('hello')",
+            crate::heredoc::ScriptLanguage::Python,
+            None,
+        );
+        assert!(hit.is_some(), "py alias should match Python");
+
+        // "ts" should match TypeScript
+        let hit = allowlist.is_content_allowlisted(
+            "interface Foo {}",
+            crate::heredoc::ScriptLanguage::TypeScript,
+            None,
+        );
+        assert!(hit.is_some(), "ts alias should match TypeScript");
+
+        // "js" should NOT match Python
+        let hit = allowlist.is_content_allowlisted(
+            "console.log('hello')",
+            crate::heredoc::ScriptLanguage::Python,
+            None,
+        );
+        assert!(hit.is_none(), "js alias should not match Python");
     }
 }
