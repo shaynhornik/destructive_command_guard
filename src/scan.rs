@@ -3736,7 +3736,9 @@ resource "null_resource" "test" {
         assert!(is_docker_compose_path(Path::new("docker-compose.yaml")));
         assert!(is_docker_compose_path(Path::new("compose.yml")));
         assert!(is_docker_compose_path(Path::new("compose.yaml")));
-        assert!(is_docker_compose_path(Path::new("/foo/bar/docker-compose.yml")));
+        assert!(is_docker_compose_path(Path::new(
+            "/foo/bar/docker-compose.yml"
+        )));
         // Case insensitive
         assert!(is_docker_compose_path(Path::new("Docker-Compose.YML")));
         assert!(is_docker_compose_path(Path::new("COMPOSE.YAML")));
@@ -3768,8 +3770,7 @@ services:
   app:
     entrypoint: /bin/sh -c "rm -rf /tmp/*"
 "#;
-        let extracted =
-            extract_docker_compose_from_str("docker-compose.yml", content, &["rm"]);
+        let extracted = extract_docker_compose_from_str("docker-compose.yml", content, &["rm"]);
         assert_eq!(extracted.len(), 1);
         assert!(extracted[0].command.contains("rm -rf"));
     }
