@@ -150,8 +150,8 @@ jobs:
         if: steps.scan.outputs.exit_code != '0'
         run: |
           echo "::error::Destructive commands detected in PR diff. Review the scan results above."
-          # Show findings in annotations
-          if [ -f scan-results.json ]; then
-            jq -r '.findings[] | select(.severity == "error") | "::error file=\(.file),line=\(.line)::\(.rule_id // .extractor_id): \(.reason // "destructive command detected")"' scan-results.json
+          # Show findings in annotations (only if valid JSON file exists)
+          if [ -f scan-results.json ] && [ -s scan-results.json ]; then
+            jq -r '.findings[] | select(.severity == "error") | "::error file=\(.file),line=\(.line)::\(.rule_id // .extractor_id): \(.reason // "destructive command detected")"' scan-results.json 2>/dev/null || true
           fi
           exit 1
