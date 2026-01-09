@@ -1,8 +1,8 @@
 # Coverage Audit & Mock Inventory Baseline
 
 **Bead**: `git_safety_guard-xqv`
-**Date**: 2026-01-08
-**Agent**: MagentaBridge
+**Date**: 2026-01-08 (updated 2026-01-09)
+**Agent**: MagentaBridge (updated by Opus4.5)
 
 ## Executive Summary
 
@@ -217,4 +217,10 @@ The codebase has a strong testing foundation:
 
 **Key Finding**: The mock inventory is remarkably small. The `MockSafePattern` and `MockDestructivePattern` in `evaluator.rs` are the only behavioral mocks, and they exist specifically to test legacy/pack parity during migration.
 
-**Recommendation**: Install `cargo-llvm-cov` and establish baseline coverage metrics before making further changes. The proposed 80% threshold is achievable with the current test suite.
+**Recommendation**: Fix coverage instrumentation timeout issues (see Coverage Tool Status), then establish baseline coverage metrics. The proposed 80% threshold is achievable with the current test suite.
+
+---
+
+## Related Documents
+
+- **E2E Coverage Matrix**: See `docs/design-2cu-false-positive-reduction.md` Section 7.1 for detailed E2E gap analysis covering hook, CLI, and scan flows.
