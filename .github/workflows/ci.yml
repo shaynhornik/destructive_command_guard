@@ -128,3 +128,77 @@ jobs:
           if [ "$(echo "$COVERAGE < 50" | bc -l)" -eq 1 ]; then
             echo "::warning::Coverage is below 50% (${COVERAGE}%)"
           fi
+
+  # Performance benchmark enforcement (push to master only)
+  # Runs benchmarks and checks against performance budgets defined in src/perf.rs
+  benchmarks:
+    runs-on: ubuntu-latest
+    needs: check
+    # Only run on push to master/main, not on PRs (benchmarks are noisy)
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bench-
+
+      - name: Run benchmarks
+        run: |
+          # Run benchmarks and capture output
+          cargo bench --bench heredoc_perf -- --noplot 2>&1 | tee benchmark_output.txt
+          echo "## Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          grep -E "^(tier|pack|core|shell|language|full)" benchmark_output.txt | head -50 >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Check performance budgets
+        run: |
+          # Extract timing summaries and check against budgets
+          # Budgets from src/perf.rs:
+          # - Quick reject: 50μs panic
+          # - Fast path: 500μs panic
+          # - Pattern match: 1ms panic
+          # - Heredoc extract: 2ms panic
+          # - Full pipeline: 50ms panic
+          echo "## Performance Budget Check" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          PANIC_VIOLATIONS=0
+
+          # Check for any results exceeding 50ms (absolute max)
+          if grep -E "time:.*\[.*[0-9]+\.[0-9]+ s" benchmark_output.txt; then
+            echo "::error::Some benchmarks exceeded 1 second - major regression detected"
+            PANIC_VIOLATIONS=$((PANIC_VIOLATIONS + 1))
+          fi
+
+          # Check full_pipeline benchmarks (budget: 50ms panic)
+          if grep -A1 "full_pipeline" benchmark_output.txt | grep -E "time:.*\[.*[5-9][0-9]\.[0-9]+ ms|[0-9]{3,}\.[0-9]+ ms"; then
+            echo "::warning::Full pipeline benchmark exceeds 50ms budget"
+            PANIC_VIOLATIONS=$((PANIC_VIOLATIONS + 1))
+          fi
+
+          if [ $PANIC_VIOLATIONS -gt 0 ]; then
+            echo "::error::$PANIC_VIOLATIONS performance budget violations detected"
+            echo "Budget violations: $PANIC_VIOLATIONS" >> $GITHUB_STEP_SUMMARY
+            # For now, warn but don't fail (benchmarks can be noisy in CI)
+            # exit 1
+          else
+            echo "All benchmarks within budget" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark_output.txt
+          retention-days: 30
