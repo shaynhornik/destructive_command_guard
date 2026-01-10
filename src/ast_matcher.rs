@@ -757,7 +757,7 @@ fn reconstruct_spawn_command(cmd: &str, args: &[&str]) -> Option<String> {
 }
 
 // ============================================================================
-// Perl regex fallback matcher (git_safety_guard-2d4)
+// Perl regex fallback ast_matcher (git_safety_guard-2d4)
 // ============================================================================
 
 static PERL_SYSTEM_EXEC_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
@@ -2080,7 +2080,7 @@ fn precompile_patterns(
 // ============================================================================
 
 #[cfg(test)]
-#[allow(clippy::similar_names)] // `matcher` vs `matches` is readable in test code
+#[allow(clippy::similar_names)] // `ast_matcher` vs `matches` is readable in test code
 mod tests {
     use super::*;
     use std::collections::HashMap;
@@ -2127,20 +2127,20 @@ mod tests {
 
     #[test]
     fn matcher_default_has_patterns() {
-        let matcher = AstMatcher::new();
-        assert!(!matcher.patterns.is_empty());
-        assert!(matcher.patterns.contains_key(&ScriptLanguage::Python));
-        assert!(matcher.patterns.contains_key(&ScriptLanguage::JavaScript));
-        assert!(matcher.patterns.contains_key(&ScriptLanguage::Ruby));
-        assert!(matcher.patterns.contains_key(&ScriptLanguage::Bash));
+        let ast_matcher = AstMatcher::new();
+        assert!(!ast_matcher.patterns.is_empty());
+        assert!(ast_matcher.patterns.contains_key(&ScriptLanguage::Python));
+        assert!(ast_matcher.patterns.contains_key(&ScriptLanguage::JavaScript));
+        assert!(ast_matcher.patterns.contains_key(&ScriptLanguage::Ruby));
+        assert!(ast_matcher.patterns.contains_key(&ScriptLanguage::Bash));
     }
 
     #[test]
     fn python_positive_match() {
-        let matcher = AstMatcher::new();
+        let ast_matcher = AstMatcher::new();
         let code = "import shutil\nshutil.rmtree('/tmp/test')";
 
-        let matches = matcher.find_matches(code, ScriptLanguage::Python);
+        let matches = ast_matcher.find_matches(code, ScriptLanguage::Python);
         match matches {
             Ok(m) => {
                 assert!(!m.is_empty(), "should match shutil.rmtree");
@@ -2153,10 +2153,10 @@ mod tests {
 
     #[test]
     fn python_negative_match() {
-        let matcher = AstMatcher::new();
+        let ast_matcher = AstMatcher::new();
         let code = "import os\nprint('hello world')";
 
-        let matches = matcher.find_matches(code, ScriptLanguage::Python);
+        let matches = ast_matcher.find_matches(code, ScriptLanguage::Python);
         match matches {
             Ok(m) => assert!(m.is_empty(), "should not match safe code"),
             Err(e) => panic!("unexpected error: {e}"),
@@ -2168,10 +2168,10 @@ mod tests {
 
         #[test]
         fn fs_rmsync_catastrophic_blocks() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "const fs = require('fs');\nfs.rmSync('/etc', { recursive: true });";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::JavaScript)
                 .unwrap();
             assert!(
@@ -2189,10 +2189,10 @@ mod tests {
 
         #[test]
         fn fs_rmsync_non_catastrophic_warns_only() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "const fs = require('fs');\nfs.rmSync('./dist', { recursive: true });";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::JavaScript)
                 .unwrap();
             assert!(
@@ -2210,10 +2210,10 @@ mod tests {
 
         #[test]
         fn execsync_git_reset_hard_blocks() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "const child_process = require('child_process');\nchild_process.execSync('git reset --hard');";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::JavaScript)
                 .unwrap();
             assert!(
@@ -2227,10 +2227,10 @@ mod tests {
 
         #[test]
         fn execsync_rm_rf_non_catastrophic_warns_only() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "const child_process = require('child_process');\nchild_process.execSync('rm -rf ./build');";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::JavaScript)
                 .unwrap();
             assert!(
@@ -2246,10 +2246,10 @@ mod tests {
 
         #[test]
         fn spawnsync_rm_rf_catastrophic_blocks() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "const child_process = require('child_process');\nchild_process.spawnSync('rm', ['-rf', '/']);";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::JavaScript)
                 .unwrap();
             assert!(
@@ -2264,10 +2264,10 @@ mod tests {
         #[test]
         fn fs_rmsync_path_traversal_escapes_tmp_blocks() {
             // Path traversal from /tmp to /etc should be detected as catastrophic
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "const fs = require('fs');\nfs.rmSync('/tmp/../etc', { recursive: true });";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::JavaScript)
                 .unwrap();
             assert!(
@@ -2289,10 +2289,10 @@ mod tests {
 
         #[test]
         fn printed_dangerous_string_does_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "console.log('rm -rf /');";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::JavaScript)
                 .unwrap();
             assert!(matches.is_empty());
@@ -2300,10 +2300,10 @@ mod tests {
 
         #[test]
         fn require_child_process_alone_does_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "require('child_process');";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::JavaScript)
                 .unwrap();
             assert!(matches.is_empty());
@@ -2311,10 +2311,10 @@ mod tests {
 
         #[test]
         fn execsync_safe_payload_does_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "const child_process = require('child_process');\nchild_process.execSync('git status');";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::JavaScript)
                 .unwrap();
             assert!(matches.is_empty());
@@ -2322,10 +2322,10 @@ mod tests {
 
         #[test]
         fn fs_rmsync_without_recursive_does_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "const fs = require('fs');\nfs.rmSync('./file.txt');";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::JavaScript)
                 .unwrap();
             assert!(matches.is_empty());
@@ -2333,10 +2333,10 @@ mod tests {
 
         #[test]
         fn spawnsync_echo_does_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "const child_process = require('child_process');\nchild_process.spawnSync('echo', ['rm -rf /']);";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::JavaScript)
                 .unwrap();
             assert!(matches.is_empty());
@@ -2345,11 +2345,11 @@ mod tests {
         #[test]
         fn fs_rmsync_tmp_dotdot_in_filename_does_not_block() {
             // Filenames with consecutive dots are NOT path traversal
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code =
                 "const fs = require('fs');\nfs.rmSync('/tmp/foo..bar', { recursive: true });";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::JavaScript)
                 .unwrap();
             // Should match as medium severity (warn), NOT as catastrophic
@@ -2362,39 +2362,39 @@ mod tests {
 
     #[test]
     fn unsupported_language_returns_error() {
-        let matcher = AstMatcher::new();
+        let ast_matcher = AstMatcher::new();
         let code = "print 'hello perl';";
 
-        let result = matcher.find_matches(code, ScriptLanguage::Unknown);
+        let result = ast_matcher.find_matches(code, ScriptLanguage::Unknown);
         assert!(matches!(result, Err(MatchError::UnsupportedLanguage(_))));
     }
 
     #[test]
     fn has_blocking_match_returns_first_blocker() {
-        let matcher = AstMatcher::new();
+        let ast_matcher = AstMatcher::new();
         let code = "import shutil\nshutil.rmtree('/danger')";
 
-        let result = matcher.has_blocking_match(code, ScriptLanguage::Python);
+        let result = ast_matcher.has_blocking_match(code, ScriptLanguage::Python);
         assert!(result.is_some());
         assert_eq!(result.unwrap().rule_id, "heredoc.python.shutil_rmtree");
     }
 
     #[test]
     fn has_blocking_match_returns_none_for_safe_code() {
-        let matcher = AstMatcher::new();
+        let ast_matcher = AstMatcher::new();
         let code = "x = 1 + 2";
 
-        let result = matcher.has_blocking_match(code, ScriptLanguage::Python);
+        let result = ast_matcher.has_blocking_match(code, ScriptLanguage::Python);
         assert!(result.is_none());
     }
 
     #[test]
     fn has_blocking_match_fails_open_on_error() {
-        let matcher = AstMatcher::new();
+        let ast_matcher = AstMatcher::new();
         let code = "some perl code";
 
         // Unknown is unsupported - should fail open (return None, not panic)
-        let result = matcher.has_blocking_match(code, ScriptLanguage::Unknown);
+        let result = ast_matcher.has_blocking_match(code, ScriptLanguage::Unknown);
         assert!(result.is_none());
     }
 
@@ -2403,12 +2403,12 @@ mod tests {
 
         #[test]
         fn perl_system_rm_rf_catastrophic_blocks() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "system(\"rm -rf /\");\n";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::Perl)
-                .expect("perl matcher should run");
+                .expect("perl ast_matcher should run");
             assert!(!matches.is_empty());
             assert!(matches[0].rule_id.contains("rm_rf"));
             assert!(matches[0].severity.blocks_by_default());
@@ -2416,12 +2416,12 @@ mod tests {
 
         #[test]
         fn perl_system_rm_rf_non_catastrophic_warns_only() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "system('rm -rf ./build');\n";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::Perl)
-                .expect("perl matcher should run");
+                .expect("perl ast_matcher should run");
             assert!(!matches.is_empty());
             assert!(matches[0].rule_id.contains("rm_rf"));
             assert!(!matches[0].severity.blocks_by_default());
@@ -2429,12 +2429,12 @@ mod tests {
 
         #[test]
         fn perl_backticks_git_reset_hard_blocks() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "`git reset --hard`;\n";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::Perl)
-                .expect("perl matcher should run");
+                .expect("perl ast_matcher should run");
             assert!(!matches.is_empty());
             assert!(matches[0].rule_id.contains("git_reset_hard"));
             assert!(matches[0].severity.blocks_by_default());
@@ -2442,12 +2442,12 @@ mod tests {
 
         #[test]
         fn perl_qx_rm_rf_catastrophic_blocks() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "qx/rm -rf \\/etc/;\n";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::Perl)
-                .expect("perl matcher should run");
+                .expect("perl ast_matcher should run");
             assert!(!matches.is_empty());
             assert!(matches[0].rule_id.contains("rm_rf"));
             assert!(matches[0].severity.blocks_by_default());
@@ -2456,12 +2456,12 @@ mod tests {
         #[test]
         fn perl_file_path_rmtree_warns_by_default() {
             // Use longer timeout for test reliability (default 20ms can be flaky under load)
-            let matcher = AstMatcher::new().with_timeout(std::time::Duration::from_millis(100));
+            let ast_matcher = AstMatcher::new().with_timeout(std::time::Duration::from_millis(100));
             let code = "use File::Path;\nFile::Path::rmtree(\"/tmp/test\");\n";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::Perl)
-                .expect("perl matcher should run within 100ms");
+                .expect("perl ast_matcher should run within 100ms");
             assert!(
                 matches
                     .iter()
@@ -2481,12 +2481,12 @@ mod tests {
 
         #[test]
         fn perl_comments_do_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "# system(\"rm -rf /\")\nprint \"ok\";\n";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::Perl)
-                .expect("perl matcher should run");
+                .expect("perl ast_matcher should run");
             assert!(
                 matches.is_empty(),
                 "commented-out dangerous code is not executed"
@@ -2495,12 +2495,12 @@ mod tests {
 
         #[test]
         fn perl_printing_dangerous_string_does_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "print \"rm -rf /\";\n";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::Perl)
-                .expect("perl matcher should run");
+                .expect("perl ast_matcher should run");
             assert!(
                 matches.is_empty(),
                 "printed strings are data, not execution"
@@ -2510,10 +2510,10 @@ mod tests {
 
     #[test]
     fn match_includes_line_number() {
-        let matcher = AstMatcher::new();
+        let ast_matcher = AstMatcher::new();
         let code = "x = 1\ny = 2\nshutil.rmtree('/test')";
 
-        let matches = matcher
+        let matches = ast_matcher
             .find_matches(code, ScriptLanguage::Python)
             .expect("should parse");
         assert!(!matches.is_empty());
@@ -2599,10 +2599,10 @@ mod tests {
 
         #[test]
         fn fileutils_rm_rf_catastrophic_blocks() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "require 'fileutils'\nFileUtils.rm_rf('/')";
 
-            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
             assert!(
                 matches
                     .iter()
@@ -2614,10 +2614,10 @@ mod tests {
 
         #[test]
         fn fileutils_rm_rf_non_catastrophic_warns_only() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "require 'fileutils'\nFileUtils.rm_rf('./tmp')";
 
-            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
             assert!(
                 matches
                     .iter()
@@ -2629,10 +2629,10 @@ mod tests {
 
         #[test]
         fn system_rm_rf_catastrophic_blocks() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "system('rm -rf /')";
 
-            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
             assert!(
                 matches
                     .iter()
@@ -2644,10 +2644,10 @@ mod tests {
 
         #[test]
         fn backticks_rm_rf_catastrophic_blocks() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "`rm -rf /`";
 
-            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
             assert!(
                 matches
                     .iter()
@@ -2659,10 +2659,10 @@ mod tests {
 
         #[test]
         fn exec_git_reset_hard_blocks() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "exec('git reset --hard HEAD~1')";
 
-            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
             assert!(
                 matches
                     .iter()
@@ -2674,10 +2674,10 @@ mod tests {
 
         #[test]
         fn open3_capture3_rm_rf_catastrophic_blocks() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "require 'open3'\nOpen3.capture3('rm -rf /')";
 
-            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
             assert!(
                 matches
                     .iter()
@@ -2689,10 +2689,10 @@ mod tests {
 
         #[test]
         fn open3_popen3_git_reset_hard_blocks() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "Open3.popen3('git reset --hard') { |i,o,e,t| }";
 
-            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
             assert!(
                 matches
                     .iter()
@@ -2708,28 +2708,28 @@ mod tests {
 
         #[test]
         fn puts_dangerous_string_does_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "puts 'rm -rf /'";
 
-            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
             assert!(matches.is_empty());
         }
 
         #[test]
         fn system_safe_payload_does_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "system('git status')";
 
-            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
             assert!(matches.is_empty());
         }
 
         #[test]
         fn open3_capture3_safe_payload_does_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "Open3.capture3('git status')";
 
-            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
             assert!(
                 matches.is_empty(),
                 "Open3.capture3 with safe payload should not match"
@@ -2738,28 +2738,28 @@ mod tests {
 
         #[test]
         fn backticks_safe_payload_does_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "`echo hello`";
 
-            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
             assert!(matches.is_empty());
         }
 
         #[test]
         fn require_only_does_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "require 'fileutils'";
 
-            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
             assert!(matches.is_empty());
         }
 
         #[test]
         fn file_delete_under_tmp_warns_only() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "File.delete('/tmp/test.txt')";
 
-            let matches = matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Ruby).unwrap();
             assert!(
                 matches
                     .iter()
@@ -2775,11 +2775,11 @@ mod tests {
 
         #[test]
         fn fs_rmsync_catastrophic_blocks_with_type_assertion() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code =
                 "import * as fs from 'fs';\nfs.rmSync('/etc' as string, { recursive: true });";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::TypeScript)
                 .unwrap();
             assert!(
@@ -2793,10 +2793,10 @@ mod tests {
 
         #[test]
         fn fs_rmsync_non_catastrophic_warns_only() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "import * as fs from 'fs';\nfs.rmSync('./dist', { recursive: true });";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::TypeScript)
                 .unwrap();
             assert!(
@@ -2810,10 +2810,10 @@ mod tests {
 
         #[test]
         fn execsync_git_reset_hard_blocks_inside_decorated_class() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "import * as child_process from 'child_process';\n@sealed\nclass Danger {\n  run(): void {\n    require('child_process').execSync('git reset --hard');\n  }\n}\n";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::TypeScript)
                 .unwrap();
             assert!(
@@ -2827,10 +2827,10 @@ mod tests {
 
         #[test]
         fn spawnsync_rm_rf_catastrophic_blocks_in_generic_function() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "import * as child_process from 'child_process';\nfunction go<T extends string>(x: T): void {\n  child_process.spawnSync('rm', ['-rf', '/']);\n}\n";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::TypeScript)
                 .unwrap();
             assert!(
@@ -2844,10 +2844,10 @@ mod tests {
 
         #[test]
         fn deno_remove_catastrophic_blocks() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "type Path = string;\nconst p: Path = '/etc';\nDeno.remove('/etc', { recursive: true });";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::TypeScript)
                 .unwrap();
             assert!(
@@ -2865,10 +2865,10 @@ mod tests {
 
         #[test]
         fn execsync_safe_payload_does_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "require('child_process').execSync('git status');";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::TypeScript)
                 .unwrap();
             assert!(matches.is_empty());
@@ -2876,10 +2876,10 @@ mod tests {
 
         #[test]
         fn fs_rmsync_without_recursive_does_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "import * as fs from 'fs';\nfs.rmSync('./file.txt' as string);";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::TypeScript)
                 .unwrap();
             assert!(matches.is_empty());
@@ -2887,10 +2887,10 @@ mod tests {
 
         #[test]
         fn printed_dangerous_string_does_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "console.log('rm -rf /');";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::TypeScript)
                 .unwrap();
             assert!(matches.is_empty());
@@ -2898,10 +2898,10 @@ mod tests {
 
         #[test]
         fn require_child_process_alone_does_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "require('child_process');";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::TypeScript)
                 .unwrap();
             assert!(matches.is_empty());
@@ -2909,10 +2909,10 @@ mod tests {
 
         #[test]
         fn spawnsync_echo_does_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "import * as child_process from 'child_process';\nchild_process.spawnSync('echo', ['rm -rf /']);";
 
-            let matches = matcher
+            let matches = ast_matcher
                 .find_matches(code, ScriptLanguage::TypeScript)
                 .unwrap();
             assert!(matches.is_empty());
@@ -2921,10 +2921,10 @@ mod tests {
 
     #[test]
     fn bash_positive_match() {
-        let matcher = AstMatcher::new();
+        let ast_matcher = AstMatcher::new();
         let code = "rm -rf /tmp/dangerous";
 
-        let matches = matcher.find_matches(code, ScriptLanguage::Bash);
+        let matches = ast_matcher.find_matches(code, ScriptLanguage::Bash);
         match matches {
             Ok(m) => {
                 assert!(!m.is_empty(), "should match rm -rf");
@@ -2937,10 +2937,10 @@ mod tests {
 
     #[test]
     fn bash_negative_match() {
-        let matcher = AstMatcher::new();
+        let ast_matcher = AstMatcher::new();
         let code = "echo 'hello world'";
 
-        let matches = matcher.find_matches(code, ScriptLanguage::Bash);
+        let matches = ast_matcher.find_matches(code, ScriptLanguage::Bash);
         match matches {
             Ok(m) => assert!(m.is_empty(), "should not match safe code"),
             Err(e) => panic!("unexpected error: {e}"),
@@ -2957,9 +2957,9 @@ mod tests {
 
         #[test]
         fn shutil_rmtree_blocks() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "import shutil\nshutil.rmtree('/dangerous/path')";
-            let matches = matcher.find_matches(code, ScriptLanguage::Python).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Python).unwrap();
             assert!(!matches.is_empty(), "shutil.rmtree must match");
             assert_eq!(matches[0].rule_id, "heredoc.python.shutil_rmtree");
             assert!(matches[0].severity.blocks_by_default());
@@ -2967,9 +2967,9 @@ mod tests {
 
         #[test]
         fn os_remove_blocks() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "import os\nos.remove('/etc/passwd')";
-            let matches = matcher.find_matches(code, ScriptLanguage::Python).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Python).unwrap();
             assert!(!matches.is_empty(), "os.remove must match");
             assert_eq!(matches[0].rule_id, "heredoc.python.os_remove");
             assert!(matches[0].severity.blocks_by_default());
@@ -2977,9 +2977,9 @@ mod tests {
 
         #[test]
         fn os_rmdir_blocks() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "import os\nos.rmdir('/important/dir')";
-            let matches = matcher.find_matches(code, ScriptLanguage::Python).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Python).unwrap();
             assert!(!matches.is_empty(), "os.rmdir must match");
             assert_eq!(matches[0].rule_id, "heredoc.python.os_rmdir");
             assert!(matches[0].severity.blocks_by_default());
@@ -2987,9 +2987,9 @@ mod tests {
 
         #[test]
         fn os_unlink_blocks() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "import os\nos.unlink('/critical/file')";
-            let matches = matcher.find_matches(code, ScriptLanguage::Python).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Python).unwrap();
             assert!(!matches.is_empty(), "os.unlink must match");
             assert_eq!(matches[0].rule_id, "heredoc.python.os_unlink");
             assert!(matches[0].severity.blocks_by_default());
@@ -2997,9 +2997,9 @@ mod tests {
 
         #[test]
         fn pathlib_unlink_blocks() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "from pathlib import Path\nPath('/secret').unlink()";
-            let matches = matcher.find_matches(code, ScriptLanguage::Python).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Python).unwrap();
             assert!(!matches.is_empty(), "pathlib.Path().unlink() must match");
             assert_eq!(matches[0].rule_id, "heredoc.python.pathlib_unlink");
             assert!(matches[0].severity.blocks_by_default());
@@ -3007,9 +3007,9 @@ mod tests {
 
         #[test]
         fn pathlib_rmdir_blocks() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "from pathlib import Path\nPath('/danger/dir').rmdir()";
-            let matches = matcher.find_matches(code, ScriptLanguage::Python).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Python).unwrap();
             assert!(!matches.is_empty(), "pathlib.Path().rmdir() must match");
             assert_eq!(matches[0].rule_id, "heredoc.python.pathlib_rmdir");
             assert!(matches[0].severity.blocks_by_default());
@@ -3019,9 +3019,9 @@ mod tests {
         fn subprocess_run_warns() {
             // subprocess.run is Medium severity - warns but doesn't block by default
             // per bead: "Do not block on shell=True alone"
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "import subprocess\nsubprocess.run(['ls', '-la'])";
-            let matches = matcher.find_matches(code, ScriptLanguage::Python).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Python).unwrap();
             assert!(!matches.is_empty(), "subprocess.run must match");
             assert_eq!(matches[0].rule_id, "heredoc.python.subprocess_run");
             assert!(
@@ -3033,9 +3033,9 @@ mod tests {
         #[test]
         fn os_system_warns() {
             // os.system is Medium severity - warns but doesn't block by default
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = "import os\nos.system('echo hello')";
-            let matches = matcher.find_matches(code, ScriptLanguage::Python).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Python).unwrap();
             assert!(!matches.is_empty(), "os.system must match");
             assert_eq!(matches[0].rule_id, "heredoc.python.os_system");
             assert!(
@@ -3051,34 +3051,34 @@ mod tests {
 
         #[test]
         fn print_statement_does_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             // String containing destructive command text is NOT executed
             let code = "print('rm -rf /')";
-            let matches = matcher.find_matches(code, ScriptLanguage::Python).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Python).unwrap();
             assert!(matches.is_empty(), "print statement must not match");
         }
 
         #[test]
         fn import_alone_does_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             // Just importing doesn't execute anything dangerous
             let code = "import shutil\nimport os\nimport subprocess";
-            let matches = matcher.find_matches(code, ScriptLanguage::Python).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Python).unwrap();
             assert!(matches.is_empty(), "imports alone must not match");
         }
 
         #[test]
         fn comment_does_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             // Comments mentioning dangerous operations are not executed
             let code = "# shutil.rmtree('/') would be dangerous\nx = 1";
-            let matches = matcher.find_matches(code, ScriptLanguage::Python).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Python).unwrap();
             assert!(matches.is_empty(), "comments must not match");
         }
 
         #[test]
         fn safe_file_operations_do_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             // Safe file operations should not trigger
             let code = r"
 import os
@@ -3088,25 +3088,25 @@ os.listdir('/tmp')
 with open('/tmp/log.txt', 'w') as f:
     f.write('hello')
 ";
-            let matches = matcher.find_matches(code, ScriptLanguage::Python).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Python).unwrap();
             assert!(matches.is_empty(), "safe file operations must not match");
         }
 
         #[test]
         fn string_variable_does_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             // String that looks like dangerous code but is just data
             let code = r#"
 dangerous_cmd = "shutil.rmtree('/')"
 docs = "Example: os.remove(path)"
 "#;
-            let matches = matcher.find_matches(code, ScriptLanguage::Python).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Python).unwrap();
             assert!(matches.is_empty(), "string literals must not match");
         }
 
         #[test]
         fn docstring_does_not_match() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             let code = r#"
 def cleanup():
     """
@@ -3115,19 +3115,19 @@ def cleanup():
     """
     pass
 "#;
-            let matches = matcher.find_matches(code, ScriptLanguage::Python).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Python).unwrap();
             assert!(matches.is_empty(), "docstrings must not match");
         }
 
         #[test]
         fn safe_tmp_cleanup_in_context() {
-            let matcher = AstMatcher::new();
+            let ast_matcher = AstMatcher::new();
             // This tests structural matching - the pattern matches but this is
             // about whether we match at all (we do), not about path safety
             // NOTE: This test verifies the pattern DOES match (as expected)
             // Path-based filtering would be a separate concern
             let code = "import shutil\nshutil.rmtree('/tmp/build_artifacts')";
-            let matches = matcher.find_matches(code, ScriptLanguage::Python).unwrap();
+            let matches = ast_matcher.find_matches(code, ScriptLanguage::Python).unwrap();
             // Pattern matching finds this - path filtering is separate policy
             assert!(!matches.is_empty(), "shutil.rmtree matches structurally");
         }
