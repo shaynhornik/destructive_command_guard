@@ -76,10 +76,14 @@ static HEREDOC_TRIGGERS: LazyLock<RegexSet> = LazyLock::new(|| {
         r"\bperl[0-9.]*\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+-[A-Za-z]*[eE][A-Za-z]*\s",
         // Node.js inline execution (matches node, node18, nodejs, nodejs18, etc.)
         r"\bnode(js)?[0-9.]*\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+-[A-Za-z]*[ep][A-Za-z]*\s",
+        // PHP inline execution
+        r"\bphp[0-9.]*\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+-[A-Za-z]*r[A-Za-z]*\s",
+        // Lua inline execution
+        r"\blua[0-9.]*\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+-[A-Za-z]*e[A-Za-z]*\s",
         // Shell inline execution (sh -c, bash -c, zsh -c, fish -c, bash -lc, etc.)
         r"\b(sh|bash|zsh|fish)\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+-[A-Za-z]*c[A-Za-z]*\s",
         // Piped execution to interpreters (versioned)
-        r"\|\s*(python[0-9.]*|ruby[0-9.]*|perl[0-9.]*|node(js)?[0-9.]*|sh|bash)\b",
+        r"\|\s*(python[0-9.]*|ruby[0-9.]*|perl[0-9.]*|node(js)?[0-9.]*|php[0-9.]*|lua[0-9.]*|sh|bash)\b",
         // Piped to xargs (can execute arbitrary commands)
         r"\|\s*xargs\s",
         // exec/eval in various contexts
@@ -644,7 +648,8 @@ pub enum ExtractionResult {
 static HEREDOC_EXTRACTOR: LazyLock<Regex> = LazyLock::new(|| {
     // Matches: <<[-~]? followed by optional quotes and delimiter
     // Groups: (1) operator variant (-/~/empty), (2) quote char, (3) delimiter, (4) closing quote
-    Regex::new(r"<<([-~])?\s*(['\x22]?)(\w+)(['\x22]?)").expect("heredoc regex compiles")
+    // Delimiter group (3) allows alphanumeric, dots, hyphens, underscores.
+    Regex::new(r"<<([-~])?\s*(['\x22]?)([\w.-]+)(['\x22]?)").expect("heredoc regex compiles")
 });
 
 /// Regex for here-string extraction with single quotes (<<<).
@@ -671,19 +676,19 @@ static HERESTRING_UNQUOTED: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Regex for inline script flag extraction with single quotes.
 static INLINE_SCRIPT_SINGLE_QUOTE: LazyLock<Regex> = LazyLock::new(|| {
-    // Matches: command -c/-e/-p/-E followed by single-quoted content
+    // Matches: command -c/-e/-p/-E/-r followed by single-quoted content
     // Groups: (1) interpreter, (2) optional "js" suffix, (3) flag, (4) content
     // Supports versioned interpreters: python3.11, ruby3.0, perl5.36, node18, nodejs20, etc.
-    Regex::new(r"\b(python[0-9.]*|ruby[0-9.]*|irb[0-9.]*|perl[0-9.]*|node(js)?[0-9.]*|sh|bash|zsh|fish)\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+(-[A-Za-z]*[ceEp][A-Za-z]*)\s+'([^']*)'")
+    Regex::new(r"\b(python[0-9.]*|ruby[0-9.]*|irb[0-9.]*|perl[0-9.]*|node(js)?[0-9.]*|php[0-9.]*|lua[0-9.]*|sh|bash|zsh|fish)\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+(-[A-Za-z]*[ceEpr][A-Za-z]*)\s+'([^']*)'")
         .expect("inline script single-quote regex compiles")
 });
 
 /// Regex for inline script flag extraction with double quotes.
 static INLINE_SCRIPT_DOUBLE_QUOTE: LazyLock<Regex> = LazyLock::new(|| {
-    // Matches: command -c/-e/-p/-E followed by double-quoted content
+    // Matches: command -c/-e/-p/-E/-r followed by double-quoted content
     // Groups: (1) interpreter, (2) optional "js" suffix, (3) flag, (4) content
     // Supports versioned interpreters: python3.11, ruby3.0, perl5.36, node18, nodejs20, etc.
-    Regex::new(r#"\b(python[0-9.]*|ruby[0-9.]*|irb[0-9.]*|perl[0-9.]*|node(js)?[0-9.]*|sh|bash|zsh|fish)\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+(-[A-Za-z]*[ceEp][A-Za-z]*)\s+"([^"]*)""#)
+    Regex::new(r#"\b(python[0-9.]*|ruby[0-9.]*|irb[0-9.]*|perl[0-9.]*|node(js)?[0-9.]*|php[0-9.]*|lua[0-9.]*|sh|bash|zsh|fish)\b(?:\s+(?:--\S+|-[A-Za-z]+))*\s+(-[A-Za-z]*[ceEpr][A-Za-z]*)\s+"([^"]*)""#)
         .expect("inline script double-quote regex compiles")
 });
 
@@ -948,6 +953,10 @@ fn extract_inline_scripts(
                 flag.contains('e') || flag.contains('E')
             } else if cmd_name.starts_with("node") {
                 flag.contains('e') || flag.contains('p')
+            } else if cmd_name.starts_with("php") {
+                flag.contains('r')
+            } else if cmd_name.starts_with("lua") {
+                flag.contains('e')
             } else {
                 // sh/bash/zsh/fish
                 flag.contains('c')
