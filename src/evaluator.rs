@@ -1899,7 +1899,7 @@ mod tests {
 
         let compiled = config.overrides.compile();
         let allowlists =
-            project_allowlists_for_rule("core.git:push-force-any", "allow core force");
+            project_allowlists_for_rule("core.git:push-force-long", "allow core force");
 
         // This command matches BOTH core.git and strict_git.
         // Allowlisting the core.git rule must not bypass strict_git.
@@ -1920,7 +1920,7 @@ mod tests {
                 .unwrap()
                 .pattern_name
                 .as_deref(),
-            Some("push-force-any")
+            Some("push-force-any") // strict_git rule name
         );
     }
 
@@ -2015,8 +2015,8 @@ mod tests {
             );
             assert_eq!(
                 result.pack_id(),
-                Some("strict_git"),
-                "Expected docker pack attribution for {cmd:?}"
+                Some("core.git"),
+                "Expected core.git attribution for {cmd:?}"
             );
         }
     }
