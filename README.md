@@ -162,6 +162,10 @@ Search indexes can take hours or days to rebuild and represent significant compu
 Backup systems are the last line of defense against data loss. Accidental deletion of snapshots, pruning of backup data, or removal of encryption keys can make recovery impossible when it's needed most.
 
 - **backup.restic** - Blocks destructive restic operations. Restic is a popular backup tool with powerful but dangerous commands. Protects: `restic forget` (removes snapshots), `restic prune` (removes unreferenced data), `restic key remove` (deletes encryption keys - can make backups unrecoverable), `restic unlock --remove-all`, `restic cache --cleanup`
+- **backup.velero** - Blocks destructive Velero operations (Kubernetes backup). Protects: `backup delete`, `schedule delete`, `restore delete`, `backup-location delete`, `snapshot-location delete`, `uninstall`
+
+### Storage Packs
+- **storage.s3** - Specialized protection for AWS S3. Covers bucket deletion, recursive object deletion, `s3 sync --delete`, and `s3api` delete operations.
 
 ### Platform Packs
 
