@@ -28,6 +28,7 @@ pub mod regex_engine;
 pub mod safe;
 pub mod search;
 pub mod secrets;
+pub mod storage;
 pub mod strict_git;
 pub mod system;
 
@@ -481,12 +482,25 @@ pub struct PackRegistry {
 
 /// Static pack entries - metadata is available without instantiating packs.
 /// Packs are built lazily on first access.
-static PACK_ENTRIES: [PackEntry; 46] = [
+static PACK_ENTRIES: [PackEntry; 48] = [
     PackEntry::new("core.git", &["git"], core::git::create_pack),
     PackEntry::new(
         "core.filesystem",
         &["rm", "/rm"],
         core::filesystem::create_pack,
+    ),
+    PackEntry::new(
+        "storage.s3",
+        &[
+            "s3",
+            "s3api",
+            "rb",
+            "delete-bucket",
+            "delete-object",
+            "delete-objects",
+            "--delete",
+        ],
+        storage::s3::create_pack,
     ),
     PackEntry::new(
         "cicd.github_actions",
@@ -595,6 +609,7 @@ static PACK_ENTRIES: [PackEntry; 46] = [
     PackEntry::new("backup.borg", &["borg"], backup::borg::create_pack),
     PackEntry::new("backup.rclone", &["rclone"], backup::rclone::create_pack),
     PackEntry::new("backup.restic", &["restic"], backup::restic::create_pack),
+    PackEntry::new("backup.velero", &["velero"], backup::velero::create_pack),
     PackEntry::new(
         "database.postgresql",
         &[
@@ -823,7 +838,7 @@ impl PackRegistry {
     /// multiple packs could match the same command. The ordering is:
     ///
     /// 0. **Tier 0 (safe)**: `safe.*` packs - safe patterns checked first to whitelist
-    /// 1. **Tier 1 (core)**: `core.*` packs - most fundamental protections
+    /// 1. **Tier 1 (core/storage)**: `core.*`, `storage.*` packs - most fundamental protections
     /// 2. **Tier 2 (system)**: `system.*` - disk, permissions, services
     /// 3. **Tier 3 (infrastructure)**: `infrastructure.*` - terraform, ansible, pulumi
     /// 4. **Tier 4 (cloud)**: `cloud.*` - aws, gcp, azure
@@ -862,7 +877,7 @@ impl PackRegistry {
         let category = pack_id.split('.').next().unwrap_or(pack_id);
         match category {
             "safe" => 0,
-            "core" => 1,
+            "core" | "storage" => 1,
             "system" => 2,
             "infrastructure" => 3,
             "cloud" | "platform" => 4,
@@ -1839,6 +1854,7 @@ mod tests {
         // Core should be highest priority (tier 1)
         assert_eq!(PackRegistry::pack_tier("core.git"), 1);
         assert_eq!(PackRegistry::pack_tier("core.filesystem"), 1);
+        assert_eq!(PackRegistry::pack_tier("storage.s3"), 1);
 
         // System should be tier 2
         assert_eq!(PackRegistry::pack_tier("system.disk"), 2);
@@ -1861,6 +1877,7 @@ mod tests {
         assert_eq!(PackRegistry::pack_tier("backup.borg"), 7);
         assert_eq!(PackRegistry::pack_tier("backup.rclone"), 7);
         assert_eq!(PackRegistry::pack_tier("backup.restic"), 7);
+        assert_eq!(PackRegistry::pack_tier("backup.velero"), 7);
         assert_eq!(PackRegistry::pack_tier("messaging.kafka"), 7);
         assert_eq!(PackRegistry::pack_tier("search.elasticsearch"), 7);
 

@@ -697,6 +697,14 @@ test_command_with_packs "kubectl delete pods --all" "block" "kubernetes.kubectl"
 test_command_with_packs "kubectl drain node-1" "block" "kubernetes.kubectl" "kubectl drain (kubectl pack enabled)"
 test_command_with_packs "kubectl get pods" "allow" "kubernetes.kubectl" "kubectl get pods (kubectl pack enabled, safe command)"
 
+# S3 pack tests
+test_command_with_packs "aws s3 rb s3://bucket" "block" "storage.s3" "aws s3 rb (s3 pack enabled)"
+test_command_with_packs "aws s3 rb s3://bucket --force" "block" "storage.s3" "aws s3 rb --force (s3 pack enabled)"
+test_command_with_packs "aws s3 rm s3://bucket --recursive" "block" "storage.s3" "aws s3 rm --recursive (s3 pack enabled)"
+test_command_with_packs "aws s3 sync s3://src s3://dest --delete" "block" "storage.s3" "aws s3 sync --delete (s3 pack enabled)"
+test_command_with_packs "aws s3 sync s3://src s3://dest" "allow" "storage.s3" "aws s3 sync (s3 pack enabled, safe command)"
+test_command_with_packs "aws s3 ls s3://bucket" "allow" "storage.s3" "aws s3 ls (s3 pack enabled, safe command)"
+
 # PostgreSQL pack tests
 test_command_with_packs "psql -c 'DROP DATABASE production;'" "block" "database.postgresql" "psql DROP DATABASE (postgresql pack enabled)"
 test_command_with_packs "psql -c 'DROP DATABASE IF EXISTS production;'" "block" "database.postgresql" "psql DROP DATABASE IF EXISTS (postgresql pack enabled)"

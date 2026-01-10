@@ -3,3 +3,4 @@
 pub mod borg;
 pub mod rclone;
 pub mod restic;
+pub mod velero;

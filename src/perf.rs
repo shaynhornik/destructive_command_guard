@@ -274,14 +274,14 @@ pub const FULL_HEREDOC_PIPELINE: Budget = Budget::from_ms(
 /// Absolute maximum time before hook mode triggers fail-open.
 /// Any operation exceeding this duration allows the command to proceed.
 /// This ensures dcg never blocks a user's workflow indefinitely.
-pub const ABSOLUTE_MAX: Duration = Duration::from_millis(50);
+pub const ABSOLUTE_MAX: Duration = Duration::from_millis(200);
 
 /// Hook evaluation time budget in milliseconds.
 ///
 /// This is the **fail-open** threshold for hook mode. Typical commands should
 /// complete in <10ms, but heredoc/inline-script analysis may take longer on
 /// pathological inputs; in those cases we fail open rather than break workflows.
-pub const HOOK_EVALUATION_BUDGET_MS: u64 = 50;
+pub const HOOK_EVALUATION_BUDGET_MS: u64 = 200;
 
 /// Hook evaluation time budget as a Duration.
 pub const HOOK_EVALUATION_BUDGET: Duration = Duration::from_millis(HOOK_EVALUATION_BUDGET_MS);
@@ -302,10 +302,10 @@ pub const FAST_PATH_BUDGET_US: u64 = 500;
 
 /// Slow path (heredoc) maximum budget in milliseconds (panic threshold).
 /// Operations exceeding this trigger fail-open behavior.
-pub const SLOW_PATH_BUDGET_MS: u64 = 50;
+pub const SLOW_PATH_BUDGET_MS: u64 = 200;
 
 /// Absolute maximum before fail-open (for documentation and config).
-pub const FAIL_OPEN_THRESHOLD_MS: u64 = 50;
+pub const FAIL_OPEN_THRESHOLD_MS: u64 = 200;
 
 #[cfg(test)]
 mod tests {
@@ -341,9 +341,9 @@ mod tests {
 
     #[test]
     fn fail_open_threshold() {
-        assert!(!should_fail_open(Duration::from_millis(49)));
-        assert!(!should_fail_open(Duration::from_millis(50)));
-        assert!(should_fail_open(Duration::from_millis(51)));
+        assert!(!should_fail_open(Duration::from_millis(199)));
+        assert!(!should_fail_open(Duration::from_millis(200)));
+        assert!(should_fail_open(Duration::from_millis(201)));
     }
 
     #[test]

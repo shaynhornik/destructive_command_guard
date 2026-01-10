@@ -200,6 +200,121 @@ jobs:
 
           echo "Coverage thresholds satisfied."
 
+  # Memory leak detection tests
+  memory-tests:
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-memory-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-memory-
+
+      - name: Run memory tests
+        id: memory_tests
+        run: |
+          echo "=== DCG Memory Leak Tests ===" | tee memory-output.log
+          echo "Timestamp: $(date -Iseconds)" | tee -a memory-output.log
+          echo "Runner: ${{ runner.os }}" | tee -a memory-output.log
+          echo "Rust: $(rustc --version)" | tee -a memory-output.log
+          echo "" | tee -a memory-output.log
+
+          # Get baseline system memory
+          echo "=== System Memory Baseline ===" | tee -a memory-output.log
+          free -h | tee -a memory-output.log
+          echo "" | tee -a memory-output.log
+
+          echo "=== Running Memory Tests ===" | tee -a memory-output.log
+          # Memory tests must run sequentially for accurate measurements
+          # Release mode for realistic performance characteristics
+          if cargo test --test memory_tests --release -- --nocapture --test-threads=1 2>&1 | tee -a memory-output.log; then
+            echo "" | tee -a memory-output.log
+            echo "=== Memory Tests: ALL PASSED ===" | tee -a memory-output.log
+            echo "memory_tests_result=passed" >> $GITHUB_OUTPUT
+          else
+            echo "" | tee -a memory-output.log
+            echo "=== Memory Tests: FAILED ===" | tee -a memory-output.log
+            echo "memory_tests_result=failed" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Parse memory metrics
+        if: always()
+        run: |
+          echo "=== Memory Test Metrics ===" | tee -a memory-metrics.log
+          echo "" | tee -a memory-metrics.log
+
+          # Extract metrics from test output
+          echo "Test Results:" | tee -a memory-metrics.log
+          grep -E "^memory_" memory-output.log | tee -a memory-metrics.log || echo "No metrics found" | tee -a memory-metrics.log
+
+          echo "" | tee -a memory-metrics.log
+          echo "Growth Summary:" | tee -a memory-metrics.log
+          grep -E "final.*growth" memory-output.log | tee -a memory-metrics.log || echo "No growth data" | tee -a memory-metrics.log
+
+          echo "" | tee -a memory-metrics.log
+          echo "Pass/Fail:" | tee -a memory-metrics.log
+          grep -E "(PASSED|FAILED|panicked)" memory-output.log | tee -a memory-metrics.log || echo "No status found" | tee -a memory-metrics.log
+
+      - name: Memory test summary
+        if: always()
+        run: |
+          echo "## Memory Leak Tests" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Result badge
+          if grep -q "ALL PASSED" memory-output.log; then
+            echo "**Result:** ✅ All tests passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Result:** ❌ Tests failed" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Metrics table
+          echo "### Memory Growth by Test" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Test | Final Growth | Limit | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------------|-------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          # Parse and format metrics
+          grep -E "final.*growth" memory-output.log | while read line; do
+            test_name=$(echo "$line" | grep -oP "^[^:]+")
+            growth=$(echo "$line" | grep -oP "growth: \\K[0-9]+ KB" || echo "?")
+            limit=$(echo "$line" | grep -oP "limit: \\K[0-9]+ KB" || echo "?")
+            if echo "$line" | grep -q "PASSED"; then
+              status="✅"
+            else
+              status="❌"
+            fi
+            echo "| $test_name | $growth | $limit | $status |" >> $GITHUB_STEP_SUMMARY
+          done
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Full Output" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tail -50 memory-output.log >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload memory test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: memory-test-output
+          path: |
+            memory-output.log
+            memory-metrics.log
+          retention-days: 14
+
   # Performance benchmark enforcement (push to master only)
   # Runs benchmarks and checks against performance budgets defined in src/perf.rs
   benchmarks:

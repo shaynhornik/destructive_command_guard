@@ -63,6 +63,7 @@ fn create_safe_patterns() -> Vec<SafePattern> {
 
 fn create_destructive_patterns() -> Vec<DestructivePattern> {
     vec![
+        // More specific patterns first
         destructive_pattern!(
             "meili-curl-delete-document",
             r#"curl\b.*-X\s*DELETE\b.*\b(?:https?://)?[^\s'\"]*(?:meili|:7700)[^\s'\"]*/indexes/[^\s/?]+/documents/[^\s/?]+"#,
@@ -70,7 +71,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "meili-curl-delete-documents",
-            r#"curl\b.*-X\s*DELETE\b.*\b(?:https?://)?[^\s'\"]*(?:meili|:7700)[^\s'\"]*/indexes/[^\s/?]+/documents\b"#,
+            r#"curl\b.*-X\s*DELETE\b.*\b(?:https?://)?[^\s'\"]*(?:meili|:7700)[^\s'\"]*/indexes/[^\s/?]+/documents(?:[\s?'"]|$)"#,
             "curl -X DELETE against /documents removes documents from Meilisearch."
         ),
         destructive_pattern!(
@@ -83,11 +84,14 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
             r#"curl\b.*-X\s*DELETE\b.*\b(?:https?://)?[^\s'\"]*(?:meili|:7700)[^\s'\"]*/keys/[^\s/?]+"#,
             "curl -X DELETE against /keys removes a Meilisearch API key."
         ),
+        // Generic index deletion last
         destructive_pattern!(
             "meili-curl-delete-index",
-            r#"curl\b.*-X\s*DELETE\b.*\b(?:https?://)?[^\s'\"]*(?:meili|:7700)[^\s'\"]*/indexes/[^\s/?]+(?:[\s?'\"]|$)"#,
+            r#"curl\b.*-X\s*DELETE\b.*\b(?:https?://)?[^\s'\"]*(?:meili|:7700)[^\s'\"]*/indexes/[^\s/?]+(?:[\s?'"]|$)"#,
             "curl -X DELETE against /indexes/{uid} deletes a Meilisearch index."
         ),
+
+        // HTTPie variants
         destructive_pattern!(
             "meili-http-delete-document",
             r"http\s+DELETE\s+(?:https?://)?\S*(?:meili|:7700)\S*/indexes/\S+/documents/\S+",
@@ -95,7 +99,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         destructive_pattern!(
             "meili-http-delete-documents",
-            r"http\s+DELETE\s+(?:https?://)?\S*(?:meili|:7700)\S*/indexes/\S+/documents\b",
+            r"http\s+DELETE\s+(?:https?://)?\S*(?:meili|:7700)\S*/indexes/\S+/documents(?:[\s?]|$)",
             "http DELETE against /documents removes documents from Meilisearch."
         ),
         destructive_pattern!(
