@@ -337,7 +337,7 @@ fn strip_env(command: &str) -> Option<(String, StrippedWrapper)> {
                     idx += 1;
                     continue;
                 }
-                'u' | 'S' | 'P' | 'C' => {
+                'u' | 'P' | 'C' => {
                     // Takes an argument
                     idx += 1;
                     while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
@@ -345,6 +345,42 @@ fn strip_env(command: &str) -> Option<(String, StrippedWrapper)> {
                     }
                     idx = consume_word_token(bytes, idx, bytes.len());
                     continue;
+                }
+                'S' => {
+                    // -S/--split-string takes an argument that becomes the command/args
+                    idx += 1;
+                    while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+                        idx += 1;
+                    }
+                    let start = idx;
+                    idx = consume_word_token(bytes, idx, bytes.len());
+                    let raw_arg = &rest[start..idx];
+                    
+                    // Unquote the argument to get the command prefix
+                    let unquoted = unquote_env_s_arg(raw_arg);
+                    
+                    // Skip whitespace after the argument
+                    while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+                        idx += 1;
+                    }
+                    let rest_of_line = &rest[idx..];
+                    
+                    // Combine unquoted arg with rest of line
+                    let remaining = if rest_of_line.is_empty() {
+                        unquoted
+                    } else {
+                        format!("{} {}", unquoted, rest_of_line)
+                    };
+                    
+                    let stripped_text = trimmed[..trimmed.len() - rest.len() + idx].trim_end().to_string();
+
+                    return Some((
+                        remaining,
+                        StrippedWrapper {
+                            wrapper_type: "env",
+                            stripped_text,
+                        },
+                    ));
                 }
                 _ => {
                     // Unknown option - stop
@@ -396,6 +432,18 @@ fn strip_env(command: &str) -> Option<(String, StrippedWrapper)> {
             stripped_text,
         },
     ))
+}
+
+fn unquote_env_s_arg(arg: &str) -> String {
+    let bytes = arg.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return arg[1..arg.len() - 1].to_string();
+        }
+    }
+    arg.to_string()
 }
 
 /// Strip `command` wrapper, but NOT when used in query mode (`-v`/`-V`).

@@ -59,7 +59,7 @@ use tracing::{debug, instrument, trace, warn};
 static HEREDOC_TRIGGERS: LazyLock<RegexSet> = LazyLock::new(|| {
     RegexSet::new([
         // Heredoc operators (bash, sh, zsh)
-        r"<<-?\s*['\x22]?\w+['\x22]?", // << or <<- with optional quotes
+        r"<<-?\s*['\x22]?[\w.-]+['\x22]?", // << or <<- with optional quotes
         r"<<<",                        // Here-strings (bash)
         // Inline interpreter execution. These patterns intentionally allow:
         // - interleaved flags (python -I -c, bash --norc -c)
