@@ -50,7 +50,7 @@ use crate::context::sanitize_for_pattern_matching;
 use crate::heredoc::{
     ExtractionResult, SkipReason, TriggerResult, check_triggers, extract_content,
 };
-use crate::packs::{REGISTRY, normalize_command, pack_aware_quick_reject};
+use crate::packs::{REGISTRY, pack_aware_quick_reject, pack_aware_quick_reject_with_normalized};
 use crate::pending_exceptions::AllowOnceStore;
 use crate::perf::Deadline;
 use chrono::Utc;
@@ -786,11 +786,17 @@ pub fn evaluate_command_with_pack_order_deadline_at_path(
     // Step 5: False-positive immunity - strip known-safe string arguments (commit messages, search
     // patterns, issue descriptions, etc.) so dangerous substrings inside data do not trigger
     // blocking.
+    //
+    // Also normalize the command here (Step 6) and reuse for pack evaluation.
+    // pack_aware_quick_reject_with_normalized returns both the quick-reject decision
+    // and the normalized command, avoiding duplicate normalization.
     let sanitized = precomputed_sanitized.unwrap_or_else(|| sanitize_for_pattern_matching(command));
     let command_for_match = sanitized.as_ref();
-    if matches!(sanitized, std::borrow::Cow::Owned(_))
-        && pack_aware_quick_reject(command_for_match, enabled_keywords)
-    {
+
+    // Use the optimized version that returns both decision and normalized form.
+    let (quick_reject, normalized) =
+        pack_aware_quick_reject_with_normalized(command_for_match, enabled_keywords);
+    if matches!(sanitized, std::borrow::Cow::Owned(_)) && quick_reject {
         if let Some((matched, layer, reason)) = heredoc_allowlist_hit {
             return EvaluationResult::allowed_by_allowlist(matched, layer, reason);
         }
@@ -801,14 +807,7 @@ pub fn evaluate_command_with_pack_order_deadline_at_path(
         return EvaluationResult::allowed_due_to_budget();
     }
 
-    // Step 6: Normalize command (strip /usr/bin/git -> git, etc.)
-    let normalized = normalize_command(command_for_match);
-
-    if deadline_exceeded(deadline) {
-        return EvaluationResult::allowed_due_to_budget();
-    }
-
-    // Check exact command and prefix allowlists
+    // Check exact command and prefix allowlists (reusing normalized from quick-reject)
     if allowlists.match_exact_command(&normalized).is_some()
         || allowlists.match_command_prefix(&normalized).is_some()
     {
@@ -1075,21 +1074,24 @@ where
     // Step 5: False-positive immunity - strip known-safe string arguments (commit messages, search
     // patterns, issue descriptions, etc.) so dangerous substrings inside data do not trigger
     // blocking.
+    //
+    // Also normalize the command here (Step 6) and reuse for pattern matching.
+    // pack_aware_quick_reject_with_normalized returns both the quick-reject decision
+    // and the normalized command, avoiding duplicate normalization.
     let sanitized = precomputed_sanitized.unwrap_or_else(|| sanitize_for_pattern_matching(command));
     let command_for_match = sanitized.as_ref();
-    if matches!(sanitized, std::borrow::Cow::Owned(_))
-        && pack_aware_quick_reject(command_for_match, enabled_keywords)
-    {
+
+    // Use the optimized version that returns both decision and normalized form.
+    let (quick_reject, normalized) =
+        pack_aware_quick_reject_with_normalized(command_for_match, enabled_keywords);
+    if matches!(sanitized, std::borrow::Cow::Owned(_)) && quick_reject {
         if let Some((matched, layer, reason)) = heredoc_allowlist_hit {
             return EvaluationResult::allowed_by_allowlist(matched, layer, reason);
         }
         return EvaluationResult::allowed();
     }
 
-    // Step 6: Normalize command (strip /usr/bin/git -> git, etc.)
-    let normalized = normalize_command(command_for_match);
-
-    // Step 7: Check legacy safe patterns (whitelist)
+    // Step 7: Check legacy safe patterns (whitelist, reusing normalized from quick-reject)
     for pattern in safe_patterns {
         if pattern.is_match(&normalized) {
             return EvaluationResult::allowed();

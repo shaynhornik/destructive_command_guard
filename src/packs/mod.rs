@@ -532,7 +532,7 @@ impl EnabledKeywordIndex {
 
 /// Static pack entries - metadata is available without instantiating packs.
 /// Packs are built lazily on first access.
-static PACK_ENTRIES: [PackEntry; 66] = [
+static PACK_ENTRIES: [PackEntry; 67] = [
     PackEntry::new("core.git", &["git"], core::git::create_pack),
     PackEntry::new(
         "core.filesystem",
@@ -838,6 +838,7 @@ static PACK_ENTRIES: [PackEntry; 66] = [
         &["wrangler"],
         cdn::cloudflare_workers::create_pack,
     ),
+    PackEntry::new("cdn.fastly", &["fastly"], cdn::fastly::create_pack),
     PackEntry::new(
         "infrastructure.terraform",
         &["terraform", "tofu"],
@@ -1326,11 +1327,29 @@ fn span_matches_any_keyword(span_text: &str, enabled_keywords: &[&str]) -> bool 
 #[inline]
 #[must_use]
 pub fn pack_aware_quick_reject(cmd: &str, enabled_keywords: &[&str]) -> bool {
+    pack_aware_quick_reject_with_normalized(cmd, enabled_keywords).0
+}
+
+/// Result of quick-reject check with the normalized command for reuse.
+///
+/// Returns `(should_reject, normalized_command)` where:
+/// - `should_reject = true` means no keywords found, safe to skip pack evaluation
+/// - `should_reject = false` means keywords found, must check packs
+/// - `normalized_command` is the normalized form (can be reused for pack evaluation)
+///
+/// When `should_reject = true` and the fast substring check failed (no keywords at all),
+/// returns `Cow::Borrowed(cmd)` since normalization was never computed.
+#[inline]
+#[must_use]
+pub fn pack_aware_quick_reject_with_normalized<'a>(
+    cmd: &'a str,
+    enabled_keywords: &[&str],
+) -> (bool, std::borrow::Cow<'a, str>) {
     // Conservative: if the caller provides no keywords, we cannot safely conclude
     // that pack evaluation can be skipped (a pack may have empty/incorrect keywords).
     // Returning false forces evaluation rather than silently allowing everything.
     if enabled_keywords.is_empty() {
-        return false;
+        return (false, normalize_command(cmd));
     }
 
     let bytes = cmd.as_bytes();
@@ -1338,7 +1357,9 @@ pub fn pack_aware_quick_reject(cmd: &str, enabled_keywords: &[&str]) -> bool {
         .iter()
         .any(|keyword| memmem::find(bytes, keyword.as_bytes()).is_some());
     if !any_substring {
-        return true;
+        // No substring match at all - return early without normalizing.
+        // The caller won't need the normalized form since we're rejecting.
+        return (true, std::borrow::Cow::Borrowed(cmd));
     }
 
     // Important: run keyword gating on a normalized view so harmless quoting or
@@ -1358,15 +1379,15 @@ pub fn pack_aware_quick_reject(cmd: &str, enabled_keywords: &[&str]) -> bool {
             continue;
         }
         if span_matches_any_keyword(span_text, enabled_keywords) {
-            return false;
+            return (false, normalized);
         }
     }
 
     if !saw_executable {
-        return true;
+        return (true, normalized);
     }
 
-    true // No keywords found in executable spans, safe to skip pack checking
+    (true, normalized) // No keywords found in executable spans, safe to skip pack checking
 }
 
 #[cfg(test)]
