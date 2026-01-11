@@ -778,6 +778,15 @@ test_command_with_packs "aws route53 list-resource-record-sets --hosted-zone-id 
 test_command_with_packs "aws route53 get-hosted-zone --id Z123" "allow" "dns.route53" "aws route53 get-hosted-zone (route53 dns pack enabled, safe command)"
 test_command_with_packs "aws route53 test-dns-answer --hosted-zone-id Z123 --record-name example.com" "allow" "dns.route53" "aws route53 test-dns-answer (route53 dns pack enabled, safe command)"
 
+# Generic DNS tools pack tests
+test_command_with_packs "echo 'delete example.com' | nsupdate" "block" "dns.generic" "nsupdate delete via pipe (generic dns pack enabled)"
+test_command_with_packs "nsupdate -l" "block" "dns.generic" "nsupdate -l local update (generic dns pack enabled)"
+test_command_with_packs "dig axfr example.com" "block" "dns.generic" "dig axfr zone transfer (generic dns pack enabled)"
+test_command_with_packs "dig example.com" "allow" "dns.generic" "dig query (generic dns pack enabled, safe command)"
+test_command_with_packs "dig +short example.com" "allow" "dns.generic" "dig +short (generic dns pack enabled, safe command)"
+test_command_with_packs "host example.com" "allow" "dns.generic" "host lookup (generic dns pack enabled, safe command)"
+test_command_with_packs "nslookup example.com" "allow" "dns.generic" "nslookup lookup (generic dns pack enabled, safe command)"
+
 # Multiple packs enabled simultaneously
 test_command_with_packs "docker system prune" "block" "containers.docker,kubernetes.kubectl" "docker system prune (multiple packs enabled)"
 test_command_with_packs "kubectl delete namespace foo" "block" "containers.docker,kubernetes.kubectl" "kubectl delete namespace (multiple packs enabled)"

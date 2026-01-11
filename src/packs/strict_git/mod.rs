@@ -33,7 +33,10 @@ fn create_safe_patterns() -> Vec<SafePattern> {
         safe_pattern!("git-log", r"git\s+log"),
         safe_pattern!("git-diff", r"git\s+diff"),
         safe_pattern!("git-show", r"git\s+show"),
-        safe_pattern!("git-branch-list", r"git\s+branch\s*$|git\s+branch\s+-[alv]"),
+        safe_pattern!(
+            "git-branch-list",
+            r"git\s+branch\s*$\|git\s+branch\s+-[alv]"
+        ),
         safe_pattern!("git-remote-v", r"git\s+remote\s+-v"),
         safe_pattern!("git-fetch", r"git\s+fetch"),
     ]
@@ -101,5 +104,37 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
             r"git\s+submodule\s+deinit",
             "git submodule deinit removes submodule configuration."
         ),
+        // Block push to master
+        destructive_pattern!(
+            "push-master",
+            r"git\s+(?:\S+\s+)*push\s+(?:.*[\s:])?master(?:\s|$)",
+            "Direct push to master is blocked. Use a Pull Request."
+        ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::packs::test_helpers::*;
+
+    #[test]
+    fn test_push_master() {
+        let pack = create_pack();
+        assert_blocks(
+            &pack,
+            "git push origin master",
+            "Direct push to master is blocked",
+        );
+        assert_blocks(&pack, "git push master", "Direct push to master is blocked");
+        assert_blocks(
+            &pack,
+            "git push origin HEAD:master",
+            "Direct push to master is blocked",
+        );
+
+        // These should be allowed (unless blocked by other rules)
+        assert_allows(&pack, "git push origin feature-master");
+        assert_allows(&pack, "git push origin master-fix");
+    }
 }

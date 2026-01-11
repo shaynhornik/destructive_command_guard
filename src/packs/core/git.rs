@@ -255,9 +255,9 @@ mod tests {
         let pack = create_pack();
 
         assert_blocks_with_severity(&pack, "git branch -D feature", Severity::High);
-        assert_blocks_with_pattern(&pack, "git branch -D feature", "branch-force");
-        assert_blocks_with_pattern(&pack, "git branch --force feature", "branch-force");
-        assert_blocks_with_pattern(&pack, "git branch -f feature", "branch-force");
+        assert_blocks_with_pattern(&pack, "git branch -D feature", "branch-force-delete");
+        assert_blocks_with_pattern(&pack, "git branch --force feature", "branch-force-delete");
+        assert_blocks_with_pattern(&pack, "git branch -f feature", "branch-force-delete");
     }
 
     #[test]

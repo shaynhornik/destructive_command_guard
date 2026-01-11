@@ -245,7 +245,7 @@ fn register_core_git_suggestions(m: &mut HashMap<&'static str, Vec<Suggestion>>)
     );
 
     m.insert(
-        "core.git:branch-force",
+        "core.git:branch-force-delete",
         vec![
             Suggestion::new(
                 SuggestionKind::PreviewFirst,
@@ -1086,7 +1086,7 @@ mod tests {
             "core.git:push-force-short",
             "core.git:checkout-discard",
             "core.git:checkout-ref-discard",
-            "core.git:branch-force",
+            "core.git:branch-force-delete",
             "core.git:restore-worktree",
             "core.git:restore-worktree-explicit",
             "core.git:stash-drop",

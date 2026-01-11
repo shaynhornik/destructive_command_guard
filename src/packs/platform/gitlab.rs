@@ -52,6 +52,10 @@ fn create_safe_patterns() -> Vec<SafePattern> {
             r"glab(?:\s+--?\S+(?:\s+\S+)?)*\s+issue\s+view\b"
         ),
         safe_pattern!(
+            "glab-variable-list",
+            r"glab(?:\s+--?\S+(?:\s+\S+)?)*\s+variable\s+list\b"
+        ),
+        safe_pattern!(
             "glab-release-list",
             r"glab(?:\s+--?\S+(?:\s+\S+)?)*\s+release\s+list\b"
         ),
@@ -84,9 +88,19 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
             "glab release delete removes GitLab releases."
         ),
         destructive_pattern!(
+            "glab-variable-delete",
+            r"glab(?:\s+--?\S+(?:\s+\S+)?)*\s+variable\s+(?:delete|remove)\b",
+            "glab variable delete removes GitLab CI/CD variables."
+        ),
+        destructive_pattern!(
             "glab-api-delete-project",
             r"glab(?:\s+--?\S+(?:\s+\S+)?)*\s+api\b.*(?:-X|--method)\s+DELETE\b.*(?:/)?projects/[^/\s]+(?:\s|$)",
             "glab api DELETE /projects/* deletes a GitLab project."
+        ),
+        destructive_pattern!(
+            "glab-api-delete-variable",
+            r"glab(?:\s+--?\S+(?:\s+\S+)?)*\s+api\b.*(?:-X|--method)\s+DELETE\b.*(?:/)?projects/[^/\s]+/variables/",
+            "glab api DELETE variables removes CI/CD variables."
         ),
         destructive_pattern!(
             "glab-api-delete-protected-branch",
@@ -148,12 +162,28 @@ mod tests {
     }
 
     #[test]
+    fn test_variable_delete_blocked() {
+        let pack = create_pack();
+        assert_blocks_with_pattern(&pack, "glab variable delete FOO", "glab-variable-delete");
+    }
+
+    #[test]
     fn test_api_delete_project_blocked() {
         let pack = create_pack();
         assert_blocks_with_pattern(
             &pack,
             "glab api -X DELETE projects/123",
             "glab-api-delete-project",
+        );
+    }
+
+    #[test]
+    fn test_api_delete_variable_blocked() {
+        let pack = create_pack();
+        assert_blocks_with_pattern(
+            &pack,
+            "glab api -X DELETE /projects/123/variables/SECRET",
+            "glab-api-delete-variable",
         );
     }
 
@@ -207,6 +237,7 @@ mod tests {
         assert_allows(&pack, "glab mr view 123");
         assert_allows(&pack, "glab issue list");
         assert_allows(&pack, "glab issue view 456");
+        assert_allows(&pack, "glab variable list");
         assert_allows(&pack, "glab release list");
         assert_allows(&pack, "glab release view v1.2.3");
         assert_allows(&pack, "glab api -X GET projects/123");

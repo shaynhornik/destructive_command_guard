@@ -591,7 +591,21 @@ impl ContextClassifier {
                 continue;
             }
 
-            if self.inline_code_commands.contains(&base_name) {
+            // Check for known interpreter, allowing for version suffixes
+            // e.g. "python3.11" matches "python", "node18" matches "node"
+            let is_interpreter = self.inline_code_commands.iter().any(|&known| {
+                if base_name == known {
+                    return true;
+                }
+                if let Some(suffix) = base_name.strip_prefix(known) {
+                    // Suffix must be non-empty and consist only of digits/dots
+                    return !suffix.is_empty()
+                        && suffix.chars().all(|c| c.is_ascii_digit() || c == '.');
+                }
+                false
+            });
+
+            if is_interpreter {
                 return true;
             }
 
@@ -836,7 +850,7 @@ fn is_piped_segment(command: &str, tokens: &[SanitizeToken], current_idx: usize)
 /// - It never strips any token that appears to contain shell-executed constructs
 ///   like `$(` or backticks (even if the flag/command is otherwise safe).
 ///
-/// This is designed to be used on the hot path, so it returns a borrowed view
+/// This is designed to be be used on the hot path, so it returns a borrowed view
 /// when no sanitization is required.
 #[must_use]
 #[allow(clippy::too_many_lines)] // Single-pass masking logic; refactor only if it becomes unreadable
@@ -1619,6 +1633,15 @@ fn consume_word_token(command: &str, bytes: &[u8], mut i: usize, len: usize) -> 
 
 #[must_use]
 fn consume_dollar_paren(command: &str, start: usize) -> usize {
+    consume_dollar_paren_recursive(command, start, 0)
+}
+
+fn consume_dollar_paren_recursive(command: &str, start: usize, recursion_depth: usize) -> usize {
+    // Prevent stack overflow on pathological input
+    if recursion_depth > 500 {
+        return command.len(); // Fail safe: consume rest of command to ensure masking
+    }
+
     let bytes = command.as_bytes();
     let len = bytes.len();
 
@@ -1666,6 +1689,11 @@ fn consume_dollar_paren(command: &str, start: usize) -> usize {
                         }
                         b'\\' => {
                             i = (i + 2).min(len);
+                        }
+                        b'$' if i + 1 < len && bytes[i + 1] == b'(' => {
+                            // Recursively consume nested command substitution inside double quotes
+                            // to ensure we don't treat its contents (like closing quotes) as ours.
+                            i = consume_dollar_paren_recursive(command, i, recursion_depth + 1);
                         }
                         _ => {
                             i += 1;

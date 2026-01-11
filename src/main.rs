@@ -26,9 +26,11 @@ use destructive_command_guard::evaluator::{
 };
 use destructive_command_guard::hook;
 use destructive_command_guard::load_default_allowlists;
-use destructive_command_guard::packs::{DecisionMode, REGISTRY};
 #[cfg(test)]
-use destructive_command_guard::packs::{normalize_command, pack_aware_quick_reject};
+use destructive_command_guard::normalize::normalize_command;
+#[cfg(test)]
+use destructive_command_guard::packs::pack_aware_quick_reject;
+use destructive_command_guard::packs::{DecisionMode, REGISTRY};
 use destructive_command_guard::pending_exceptions::{PendingExceptionStore, log_maintenance};
 use destructive_command_guard::perf::{Deadline, HOOK_EVALUATION_BUDGET};
 // Import HookInput for parsing stdin JSON in hook mode
@@ -320,7 +322,8 @@ fn main() {
                 _ => info.reason.clone(),
             };
 
-            if let Ok((_record, maintenance)) = store.record_block(
+            let mut allow_once_info: Option<hook::AllowOnceInfo> = None;
+            if let Ok((record, maintenance)) = store.record_block(
                 &command,
                 &cwd_display,
                 &reason,
@@ -328,12 +331,22 @@ fn main() {
                 false,
                 Some(format!("{:?}", info.source)),
             ) {
+                allow_once_info = Some(hook::AllowOnceInfo {
+                    code: record.short_code,
+                    full_hash: record.full_hash,
+                });
                 if let Some(log_file) = config.general.log_file.as_deref() {
                     let _ = log_maintenance(log_file, maintenance, "record_block");
                 }
             }
 
-            hook::output_denial(&command, &info.reason, pack, pattern);
+            hook::output_denial(
+                &command,
+                &info.reason,
+                pack,
+                pattern,
+                allow_once_info.as_ref(),
+            );
 
             // Log if configured
             if let Some(log_file) = &config.general.log_file {
@@ -541,6 +554,8 @@ mod tests {
                          If this operation is truly needed, ask the user for explicit \
                          permission and have them run the command manually."
                     )),
+                    allow_once_code: None,
+                    allow_once_full_hash: None,
                 },
             }
         }

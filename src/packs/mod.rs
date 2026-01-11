@@ -25,6 +25,7 @@ pub mod loadbalancer;
 pub mod messaging;
 pub mod monitoring;
 pub mod package_managers;
+pub mod payment;
 pub mod platform;
 pub mod regex_engine;
 pub mod remote;
@@ -483,7 +484,7 @@ pub struct PackRegistry {
 
 /// Static pack entries - metadata is available without instantiating packs.
 /// Packs are built lazily on first access.
-static PACK_ENTRIES: [PackEntry; 56] = [
+static PACK_ENTRIES: [PackEntry; 63] = [
     PackEntry::new("core.git", &["git"], core::git::create_pack),
     PackEntry::new(
         "core.filesystem",
@@ -566,6 +567,19 @@ static PACK_ENTRIES: [PackEntry; 56] = [
         loadbalancer::traefik::create_pack,
     ),
     PackEntry::new(
+        "loadbalancer.elb",
+        &[
+            "elbv2",
+            "delete-load-balancer",
+            "delete-target-group",
+            "deregister-targets",
+            "delete-listener",
+            "delete-rule",
+            "deregister-instances-from-load-balancer",
+        ],
+        loadbalancer::elb::create_pack,
+    ),
+    PackEntry::new(
         "monitoring.splunk",
         &["splunk"],
         monitoring::splunk::create_pack,
@@ -574,6 +588,57 @@ static PACK_ENTRIES: [PackEntry; 56] = [
         "monitoring.datadog",
         &["datadog-ci", "datadoghq", "datadog"],
         monitoring::datadog::create_pack,
+    ),
+    PackEntry::new(
+        "monitoring.pagerduty",
+        &["pd", "pagerduty", "api.pagerduty.com"],
+        monitoring::pagerduty::create_pack,
+    ),
+    PackEntry::new(
+        "monitoring.newrelic",
+        &["newrelic", "api.newrelic.com", "graphql"],
+        monitoring::newrelic::create_pack,
+    ),
+    PackEntry::new(
+        "monitoring.prometheus",
+        &[
+            "promtool",
+            "grafana-cli",
+            "/api/v1/admin/tsdb/delete_series",
+            "delete_series",
+            "/api/dashboards",
+            "/api/datasources",
+            "/api/alert-notifications",
+            "/etc/prometheus",
+            "rules.d",
+            "prometheusrule",
+            "servicemonitor",
+            "podmonitor",
+        ],
+        monitoring::prometheus::create_pack,
+    ),
+    PackEntry::new(
+        "payment.stripe",
+        &["stripe", "api.stripe.com"],
+        payment::stripe::create_pack,
+    ),
+    PackEntry::new(
+        "payment.braintree",
+        &[
+            "braintree",
+            "braintreegateway.com",
+            "braintree.",
+            "gateway.customer.",
+            "gateway.merchant_account.",
+            "gateway.payment_method.",
+            "gateway.subscription.",
+        ],
+        payment::braintree::create_pack,
+    ),
+    PackEntry::new(
+        "payment.square",
+        &["square", "api.squareup.com"],
+        payment::square::create_pack,
     ),
     PackEntry::new(
         "messaging.kafka",
@@ -916,8 +981,8 @@ impl PackRegistry {
             "backup" | "database" | "messaging" | "search" => 7,
             "package_managers" => 8,
             "strict_git" => 9,
-            "cicd" | "secrets" | "monitoring" => 10, // CI/CD + secrets + monitoring tooling
-            _ => 11,                                 // Unknown categories go last
+            "cicd" | "secrets" | "monitoring" | "payment" => 10, // CI/CD + secrets + monitoring + payment tooling
+            _ => 11,                                             // Unknown categories go last
         }
     }
 

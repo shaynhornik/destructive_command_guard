@@ -678,42 +678,88 @@ pub enum AllowlistAction {
     },
 }
 
+/// Subcommands for managing allow-once entries.
+#[derive(Subcommand, Debug, Clone)]
+pub enum AllowOnceAction {
+    /// List pending codes and active allow-once entries (redacted by default)
+    #[command(name = "list")]
+    List,
+
+    /// Clear expired entries and optionally wipe stores
+    #[command(name = "clear")]
+    Clear(AllowOnceClearArgs),
+
+    /// Revoke a pending code or active allow-once entry
+    #[command(name = "revoke")]
+    Revoke(AllowOnceRevokeArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AllowOnceClearArgs {
+    /// Wipe both pending codes and active allow-once entries
+    #[arg(long)]
+    pub all: bool,
+
+    /// Wipe pending codes
+    #[arg(long)]
+    pub pending: bool,
+
+    /// Wipe active allow-once entries
+    #[arg(long = "allow-once")]
+    pub allow_once: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AllowOnceRevokeArgs {
+    /// Short code or full hash (or prefix) to revoke
+    pub target: String,
+}
+
 /// Allow-once command arguments.
+///
+/// - `dcg allow-once <CODE>` (legacy shorthand for applying an allow-once code)
+/// - `dcg allow-once list|clear|revoke` (management commands)
 #[derive(Args, Debug)]
+#[command(subcommand_precedence_over_arg = true)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct AllowOnceCommand {
-    /// Short code printed at the top of a denial message
-    pub code: String,
+    /// Optional management subcommand.
+    #[command(subcommand)]
+    pub action: Option<AllowOnceAction>,
+
+    /// Short code printed at the top of a denial message (legacy shorthand for apply)
+    #[arg(value_name = "CODE")]
+    pub code: Option<String>,
 
     /// Automatically confirm (non-interactive)
-    #[arg(long, short = 'y')]
+    #[arg(long, short = 'y', global = true)]
     pub yes: bool,
 
     /// Show raw command text in output (default shows redacted)
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub show_raw: bool,
 
-    /// Dry-run (do not write allow-once entry)
+    /// Dry-run (do not write allow-once entry) (apply-only)
     #[arg(long)]
     pub dry_run: bool,
 
     /// Output JSON for automation
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub json: bool,
 
-    /// Allow a single use only (consumed after first allow)
+    /// Allow a single use only (consumed after first allow) (apply-only)
     #[arg(long)]
     pub single_use: bool,
 
-    /// Override explicit config blocklist (extra confirmation required)
+    /// Override explicit config blocklist (extra confirmation required) (apply-only)
     #[arg(long)]
     pub force: bool,
 
-    /// Select a specific entry when multiple match the code (1-based)
+    /// Select a specific entry when multiple match the code (1-based) (apply-only)
     #[arg(long, value_name = "N", conflicts_with = "hash")]
     pub pick: Option<usize>,
 
-    /// Select by full hash when multiple match the code
+    /// Select by full hash when multiple match the code (apply-only)
     #[arg(long, value_name = "HASH", conflicts_with = "pick")]
     pub hash: Option<String>,
 }
@@ -4128,18 +4174,28 @@ fn handle_allow_once_command(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::{self, Write};
 
+    if let Some(action) = &cmd.action {
+        match action {
+            AllowOnceAction::List => return handle_allow_once_list(config, cmd),
+            AllowOnceAction::Clear(args) => return handle_allow_once_clear(config, cmd, args),
+            AllowOnceAction::Revoke(args) => return handle_allow_once_revoke(config, cmd, args),
+        }
+    }
+
+    let Some(code) = cmd.code.as_deref() else {
+        return Err("Missing allow-once code. Usage: dcg allow-once <CODE>".into());
+    };
+
     let now = Utc::now();
     let cwd = std::env::current_dir().unwrap_or_default();
     let pending_path = PendingExceptionStore::default_path(Some(&cwd));
     let pending_store = PendingExceptionStore::new(pending_path);
 
-    let (matches, _maintenance) = pending_store.lookup_by_code(&cmd.code, now)?;
+    let (matches, _maintenance) = pending_store.lookup_by_code(code, now)?;
     if matches.is_empty() {
-        return Err(format!(
-            "No pending exception found for code '{}'. It may be expired.",
-            cmd.code
-        )
-        .into());
+        return Err(
+            format!("No pending exception found for code '{code}'. It may be expired.").into(),
+        );
     }
 
     let selected = select_pending_entry(&matches, cmd)?;
@@ -4180,7 +4236,7 @@ fn handle_allow_once_command(
     if cmd.json {
         let output = serde_json::json!({
             "status": "ok",
-            "code": cmd.code,
+            "code": code,
             "dry_run": cmd.dry_run,
             "single_use": cmd.single_use,
             "force": entry.force_allow_config,
@@ -4249,6 +4305,359 @@ fn handle_allow_once_command(
     }
 
     Ok(())
+}
+
+fn handle_allow_once_list(
+    _config: &Config,
+    cmd: &AllowOnceCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let now = Utc::now();
+    let cwd = std::env::current_dir().unwrap_or_default();
+
+    let pending_store = PendingExceptionStore::new(PendingExceptionStore::default_path(Some(&cwd)));
+    let allow_once_store = AllowOnceStore::new(AllowOnceStore::default_path(Some(&cwd)));
+
+    let (pending, pending_maintenance) = pending_store.load_active(now)?;
+    let (allow_once, allow_once_maintenance) = allow_once_store.load_active(now)?;
+
+    if cmd.json {
+        let output = build_allow_once_list_json(
+            &pending,
+            pending_maintenance,
+            &allow_once,
+            allow_once_maintenance,
+            cmd.show_raw,
+        );
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    println!("Allow-once pending codes: {}", pending.len());
+    if pending.is_empty() {
+        println!("  (none)");
+    } else {
+        for record in &pending {
+            let cmd_display = if cmd.show_raw {
+                record.command_raw.as_str()
+            } else {
+                record.command_redacted.as_str()
+            };
+            println!(
+                "  - {} [{}] {}",
+                record.short_code,
+                &record.full_hash[..8.min(record.full_hash.len())],
+                cmd_display
+            );
+        }
+    }
+
+    println!();
+    println!("Allow-once active entries: {}", allow_once.len());
+    if allow_once.is_empty() {
+        println!("  (none)");
+    } else {
+        for entry in &allow_once {
+            let cmd_display = if cmd.show_raw {
+                entry.command_raw.as_str()
+            } else {
+                entry.command_redacted.as_str()
+            };
+            println!(
+                "  - {} [{}] {}",
+                entry.source_short_code,
+                &entry.source_full_hash[..8.min(entry.source_full_hash.len())],
+                cmd_display
+            );
+        }
+    }
+
+    if !pending_maintenance.is_empty() || !allow_once_maintenance.is_empty() {
+        println!();
+        println!(
+            "Maintenance: pending(pruned_expired={}, pruned_consumed={}, parse_errors={}), allow_once(pruned_expired={}, pruned_consumed={}, parse_errors={})",
+            pending_maintenance.pruned_expired,
+            pending_maintenance.pruned_consumed,
+            pending_maintenance.parse_errors,
+            allow_once_maintenance.pruned_expired,
+            allow_once_maintenance.pruned_consumed,
+            allow_once_maintenance.parse_errors
+        );
+    }
+
+    Ok(())
+}
+
+fn build_allow_once_list_json(
+    pending: &[PendingExceptionRecord],
+    pending_maintenance: crate::pending_exceptions::PendingMaintenance,
+    allow_once: &[AllowOnceEntry],
+    allow_once_maintenance: crate::pending_exceptions::PendingMaintenance,
+    show_raw: bool,
+) -> serde_json::Value {
+    let pending_json: Vec<serde_json::Value> = pending
+        .iter()
+        .map(|record| {
+            serde_json::json!({
+                "short_code": &record.short_code,
+                "full_hash": &record.full_hash,
+                "created_at": &record.created_at,
+                "expires_at": &record.expires_at,
+                "cwd": &record.cwd,
+                "reason": &record.reason,
+                "single_use": record.single_use,
+                "source": record.source.as_deref(),
+                "command": if show_raw { &record.command_raw } else { &record.command_redacted },
+            })
+        })
+        .collect();
+
+    let allow_once_json: Vec<serde_json::Value> = allow_once
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "source_short_code": &entry.source_short_code,
+                "source_full_hash": &entry.source_full_hash,
+                "created_at": &entry.created_at,
+                "expires_at": &entry.expires_at,
+                "scope_kind": format!("{:?}", entry.scope_kind).to_lowercase(),
+                "scope_path": &entry.scope_path,
+                "reason": &entry.reason,
+                "single_use": entry.single_use,
+                "force_allow_config": entry.force_allow_config,
+                "command": if show_raw { &entry.command_raw } else { &entry.command_redacted },
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "status": "ok",
+        "pending": {
+            "count": pending_json.len(),
+            "maintenance": pending_maintenance,
+            "entries": pending_json,
+        },
+        "allow_once": {
+            "count": allow_once_json.len(),
+            "maintenance": allow_once_maintenance,
+            "entries": allow_once_json,
+        },
+    })
+}
+
+fn handle_allow_once_clear(
+    config: &Config,
+    cmd: &AllowOnceCommand,
+    args: &AllowOnceClearArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{self, Write};
+
+    if cmd.json && !cmd.yes {
+        return Err("JSON output requires --yes to avoid interactive prompts.".into());
+    }
+
+    let now = Utc::now();
+    let cwd = std::env::current_dir().unwrap_or_default();
+
+    let pending_store = PendingExceptionStore::new(PendingExceptionStore::default_path(Some(&cwd)));
+    let allow_once_store = AllowOnceStore::new(AllowOnceStore::default_path(Some(&cwd)));
+
+    let wipe_pending = args.all || args.pending;
+    let wipe_allow_once = args.all || args.allow_once;
+
+    let (pending_preview, pending_preview_maintenance) = pending_store.preview_active(now)?;
+    let (allow_once_preview, allow_once_preview_maintenance) =
+        allow_once_store.preview_active(now)?;
+
+    let pending_wipe_count = if wipe_pending {
+        pending_preview.len()
+    } else {
+        0
+    };
+    let allow_once_wipe_count = if wipe_allow_once {
+        allow_once_preview.len()
+    } else {
+        0
+    };
+
+    if !cmd.json && !cmd.yes && (wipe_pending || wipe_allow_once) {
+        println!("Allow-once clear confirmation:");
+        println!("  pending_wipe_active={pending_wipe_count}");
+        println!("  allow_once_wipe_active={allow_once_wipe_count}");
+        print!("Proceed? [y/N]: ");
+        io::stdout().flush()?;
+        let mut response = String::new();
+        io::stdin().read_line(&mut response)?;
+        let response = response.trim().to_lowercase();
+        if response != "y" && response != "yes" {
+            return Err("Aborted.".into());
+        }
+    }
+
+    let (pending_wiped, pending_maintenance) = if wipe_pending {
+        pending_store.clear_all(now)?
+    } else {
+        let (_active, maintenance) = pending_store.load_active(now)?;
+        (0, maintenance)
+    };
+    let (allow_once_wiped, allow_once_maintenance) = if wipe_allow_once {
+        allow_once_store.clear_all(now)?
+    } else {
+        let (_active, maintenance) = allow_once_store.load_active(now)?;
+        (0, maintenance)
+    };
+
+    if let Some(log_file) = config.general.log_file.as_deref() {
+        let _ = crate::pending_exceptions::log_allow_once_action(
+            log_file,
+            "clear",
+            &format!(
+                "pending_wiped={pending_wiped}, allow_once_wiped={allow_once_wiped}, flags=all:{} pending:{} allow_once:{}",
+                args.all, args.pending, args.allow_once
+            ),
+        );
+    }
+
+    if cmd.json {
+        let output = serde_json::json!({
+            "status": "ok",
+            "pending": {
+                "wiped": pending_wiped,
+                "preview_maintenance": pending_preview_maintenance,
+                "maintenance": pending_maintenance,
+            },
+            "allow_once": {
+                "wiped": allow_once_wiped,
+                "preview_maintenance": allow_once_preview_maintenance,
+                "maintenance": allow_once_maintenance,
+            },
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    println!("✓ Cleared allow-once stores");
+    println!("  Pending wiped: {pending_wiped}");
+    println!("  Allow-once wiped: {allow_once_wiped}");
+    Ok(())
+}
+
+fn handle_allow_once_revoke(
+    config: &Config,
+    cmd: &AllowOnceCommand,
+    args: &AllowOnceRevokeArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{self, Write};
+
+    if cmd.json && !cmd.yes {
+        return Err("JSON output requires --yes to avoid interactive prompts.".into());
+    }
+
+    let now = Utc::now();
+    let cwd = std::env::current_dir().unwrap_or_default();
+
+    let pending_store = PendingExceptionStore::new(PendingExceptionStore::default_path(Some(&cwd)));
+    let allow_once_store = AllowOnceStore::new(AllowOnceStore::default_path(Some(&cwd)));
+
+    let (pending_preview, _) = pending_store.preview_active(now)?;
+    let (allow_once_preview, _) = allow_once_store.preview_active(now)?;
+    let full_hash =
+        resolve_allow_once_revoke_target(&args.target, &pending_preview, &allow_once_preview)?;
+
+    if !cmd.json && !cmd.yes {
+        println!("Allow-once revoke confirmation:");
+        println!("  target: {}", args.target);
+        println!("  resolved_full_hash: {full_hash}");
+        print!("Proceed? [y/N]: ");
+        io::stdout().flush()?;
+        let mut response = String::new();
+        io::stdin().read_line(&mut response)?;
+        let response = response.trim().to_lowercase();
+        if response != "y" && response != "yes" {
+            return Err("Aborted.".into());
+        }
+    }
+
+    let (pending_removed, pending_maintenance) =
+        pending_store.remove_by_full_hash(&full_hash, now)?;
+    let (allow_once_removed, allow_once_maintenance) =
+        allow_once_store.remove_by_source_full_hash(&full_hash, now)?;
+
+    if let Some(log_file) = config.general.log_file.as_deref() {
+        let _ = crate::pending_exceptions::log_allow_once_action(
+            log_file,
+            "revoke",
+            &format!(
+                "target={}, full_hash={}, pending_removed={}, allow_once_removed={}",
+                args.target, full_hash, pending_removed, allow_once_removed
+            ),
+        );
+    }
+
+    if cmd.json {
+        let output = serde_json::json!({
+            "status": "ok",
+            "target": &args.target,
+            "full_hash": full_hash,
+            "pending": { "removed": pending_removed, "maintenance": pending_maintenance },
+            "allow_once": { "removed": allow_once_removed, "maintenance": allow_once_maintenance },
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    println!("✓ Revoked allow-once exception");
+    println!("  Pending removed: {pending_removed}");
+    println!("  Allow-once removed: {allow_once_removed}");
+    Ok(())
+}
+
+fn resolve_allow_once_revoke_target(
+    target: &str,
+    pending: &[PendingExceptionRecord],
+    allow_once: &[AllowOnceEntry],
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut matches: Vec<String> = Vec::new();
+
+    if target.len() <= 4 {
+        matches.extend(
+            pending
+                .iter()
+                .filter(|record| record.short_code == target)
+                .map(|record| record.full_hash.clone()),
+        );
+        matches.extend(
+            allow_once
+                .iter()
+                .filter(|entry| entry.source_short_code == target)
+                .map(|entry| entry.source_full_hash.clone()),
+        );
+    } else {
+        matches.extend(
+            pending
+                .iter()
+                .filter(|record| record.full_hash.starts_with(target))
+                .map(|record| record.full_hash.clone()),
+        );
+        matches.extend(
+            allow_once
+                .iter()
+                .filter(|entry| entry.source_full_hash.starts_with(target))
+                .map(|entry| entry.source_full_hash.clone()),
+        );
+    }
+
+    matches.sort();
+    matches.dedup();
+
+    match matches.as_slice() {
+        [] => Err(format!("No allow-once exception found matching '{target}'.").into()),
+        [one] => Ok(one.clone()),
+        many => Err(format!(
+            "Ambiguous allow-once revoke target '{target}'. Matches: {}",
+            many.join(", ")
+        )
+        .into()),
+    }
 }
 
 fn select_pending_entry<'a>(
@@ -5712,13 +6121,36 @@ mod tests {
             "2",
         ]);
         if let Some(Command::AllowOnce(cmd)) = cli.command {
-            assert_eq!(cmd.code, "ab12");
+            assert_eq!(cmd.code.as_deref(), Some("ab12"));
+            assert!(cmd.action.is_none());
             assert!(cmd.single_use);
             assert!(cmd.dry_run);
             assert!(cmd.yes);
             assert_eq!(cmd.pick, Some(2));
         } else {
             panic!("Expected AllowOnce command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_allow_once_list() {
+        let cli = Cli::parse_from(["dcg", "allow-once", "list"]);
+        if let Some(Command::AllowOnce(cmd)) = cli.command {
+            assert!(matches!(cmd.action, Some(AllowOnceAction::List)));
+        } else {
+            panic!("Expected AllowOnce list command");
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_allow_once_revoke_with_global_flags_after_subcommand() {
+        let cli = Cli::parse_from(["dcg", "allow-once", "revoke", "deadbeef", "--yes", "--json"]);
+        if let Some(Command::AllowOnce(cmd)) = cli.command {
+            assert!(cmd.yes);
+            assert!(cmd.json);
+            assert!(matches!(cmd.action, Some(AllowOnceAction::Revoke(_))));
+        } else {
+            panic!("Expected AllowOnce revoke command");
         }
     }
 
@@ -6955,6 +7387,110 @@ exclude = ["target/**"]
         assert!(!is_dcg_command("other-hook"));
         assert!(!is_dcg_command(""));
         assert!(!is_dcg_command("dcg-wrapper"));
+    }
+
+    #[test]
+    fn allow_once_disambiguation_selects_by_pick_or_hash() {
+        use crate::logging::{RedactionConfig, RedactionMode};
+
+        let ts = chrono::DateTime::parse_from_rfc3339("2099-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let redaction = RedactionConfig {
+            enabled: true,
+            mode: RedactionMode::Arguments,
+            max_argument_len: 8,
+        };
+
+        let a =
+            PendingExceptionRecord::new(ts, "/repo", "git status", "ok", &redaction, false, None);
+        let mut b = PendingExceptionRecord::new(
+            ts,
+            "/repo",
+            "git reset --hard",
+            "blocked",
+            &redaction,
+            false,
+            None,
+        );
+        // Force a short-code collision to exercise disambiguation.
+        b.short_code = a.short_code.clone();
+
+        let cmd_pick = AllowOnceCommand {
+            action: None,
+            code: Some(a.short_code.clone()),
+            yes: true,
+            show_raw: false,
+            dry_run: true,
+            json: true,
+            single_use: false,
+            force: false,
+            pick: Some(2),
+            hash: None,
+        };
+        let records = [a.clone(), b.clone()];
+        let selected = select_pending_entry(&records, &cmd_pick).unwrap();
+        assert_eq!(selected.command_raw, b.command_raw);
+
+        let cmd_hash = AllowOnceCommand {
+            action: None,
+            code: Some(a.short_code.clone()),
+            yes: true,
+            show_raw: false,
+            dry_run: true,
+            json: true,
+            single_use: false,
+            force: false,
+            pick: None,
+            hash: Some(b.full_hash.clone()),
+        };
+        let records = [a, b.clone()];
+        let selected = select_pending_entry(&records, &cmd_hash).unwrap();
+        assert_eq!(selected.full_hash, b.full_hash);
+    }
+
+    #[test]
+    fn allow_once_disambiguation_rejects_invalid_pick() {
+        use crate::logging::{RedactionConfig, RedactionMode};
+
+        let ts = chrono::DateTime::parse_from_rfc3339("2099-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let redaction = RedactionConfig {
+            enabled: true,
+            mode: RedactionMode::Arguments,
+            max_argument_len: 8,
+        };
+
+        let a =
+            PendingExceptionRecord::new(ts, "/repo", "git status", "ok", &redaction, false, None);
+        let mut b = PendingExceptionRecord::new(
+            ts,
+            "/repo",
+            "git reset --hard",
+            "blocked",
+            &redaction,
+            false,
+            None,
+        );
+        b.short_code = a.short_code.clone();
+
+        let cmd_pick = AllowOnceCommand {
+            action: None,
+            code: Some(a.short_code.clone()),
+            yes: true,
+            show_raw: false,
+            dry_run: true,
+            json: true,
+            single_use: false,
+            force: false,
+            pick: Some(3),
+            hash: None,
+        };
+
+        let records = [a, b];
+        let err = select_pending_entry(&records, &cmd_pick).expect_err("invalid pick should error");
+        assert!(err.to_string().contains("Pick must be between 1 and 2"));
     }
 
     #[test]

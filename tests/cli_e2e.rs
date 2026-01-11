@@ -186,6 +186,233 @@ mod explain_tests {
 }
 
 // ============================================================================
+// Allow-once management CLI tests
+// ============================================================================
+
+mod allow_once_management_tests {
+    use super::*;
+
+    use chrono::{DateTime, Utc};
+    use destructive_command_guard::logging::{RedactionConfig, RedactionMode};
+    use destructive_command_guard::pending_exceptions::{
+        AllowOnceEntry, AllowOnceScopeKind, PendingExceptionRecord,
+    };
+
+    struct AllowOnceEnv {
+        temp: tempfile::TempDir,
+        home_dir: std::path::PathBuf,
+        xdg_config_dir: std::path::PathBuf,
+        pending_path: std::path::PathBuf,
+        allow_once_path: std::path::PathBuf,
+    }
+
+    impl AllowOnceEnv {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let home_dir = temp.path().join("home");
+            let xdg_config_dir = temp.path().join("xdg_config");
+            std::fs::create_dir_all(&home_dir).expect("HOME dir");
+            std::fs::create_dir_all(&xdg_config_dir).expect("XDG_CONFIG_HOME dir");
+
+            let pending_path = temp.path().join("pending_exceptions.jsonl");
+            let allow_once_path = temp.path().join("allow_once.jsonl");
+
+            Self {
+                temp,
+                home_dir,
+                xdg_config_dir,
+                pending_path,
+                allow_once_path,
+            }
+        }
+
+        fn write_records(&self, pending: &PendingExceptionRecord, allow_once: &AllowOnceEntry) {
+            let pending_line = serde_json::to_string(pending).expect("serialize pending");
+            let allow_once_line = serde_json::to_string(allow_once).expect("serialize allow-once");
+
+            std::fs::write(&self.pending_path, format!("{pending_line}\n"))
+                .expect("write pending jsonl");
+            std::fs::write(&self.allow_once_path, format!("{allow_once_line}\n"))
+                .expect("write allow-once jsonl");
+        }
+
+        fn run(&self, args: &[&str]) -> std::process::Output {
+            Command::new(dcg_binary())
+                .env_clear()
+                .env("HOME", &self.home_dir)
+                .env("XDG_CONFIG_HOME", &self.xdg_config_dir)
+                .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
+                .env("DCG_PENDING_EXCEPTIONS_PATH", &self.pending_path)
+                .env("DCG_ALLOW_ONCE_PATH", &self.allow_once_path)
+                .current_dir(self.temp.path())
+                .args(args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .expect("run dcg")
+        }
+    }
+
+    fn fixed_timestamp() -> DateTime<Utc> {
+        // Use a far-future timestamp so tests don't become time-sensitive as real time advances.
+        DateTime::parse_from_rfc3339("2099-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    const fn redaction_config() -> RedactionConfig {
+        RedactionConfig {
+            enabled: true,
+            mode: RedactionMode::Arguments,
+            max_argument_len: 4,
+        }
+    }
+
+    #[test]
+    fn allow_once_list_redacts_by_default_and_show_raw_reveals() {
+        let env = AllowOnceEnv::new();
+        let now = fixed_timestamp();
+        let redaction = redaction_config();
+
+        let command_raw = r#"echo "0123456789""#;
+        let pending = PendingExceptionRecord::new(
+            now,
+            env.temp.path().to_string_lossy().as_ref(),
+            command_raw,
+            "test pending",
+            &redaction,
+            false,
+            None,
+        );
+        let allow_once = AllowOnceEntry::from_pending(
+            &pending,
+            now,
+            AllowOnceScopeKind::Cwd,
+            env.temp.path().to_string_lossy().as_ref(),
+            false,
+            false,
+            &redaction,
+        );
+        env.write_records(&pending, &allow_once);
+
+        let output = env.run(&["allow-once", "list"]);
+        assert!(
+            output.status.success(),
+            "list should succeed: stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains(&pending.command_redacted));
+        assert!(stdout.contains(&allow_once.command_redacted));
+        assert!(
+            !stdout.contains("0123456789"),
+            "raw secret should not appear"
+        );
+
+        let output_raw = env.run(&["allow-once", "list", "--show-raw"]);
+        assert!(output_raw.status.success());
+        let stdout_raw = String::from_utf8_lossy(&output_raw.stdout);
+        assert!(
+            stdout_raw.contains("0123456789"),
+            "raw secret should appear"
+        );
+    }
+
+    #[test]
+    fn allow_once_revoke_removes_pending_and_active() {
+        let env = AllowOnceEnv::new();
+        let now = fixed_timestamp();
+        let redaction = redaction_config();
+
+        let command_raw = r#"echo "abcdefghijklmnopqrstuvwxyz""#;
+        let pending = PendingExceptionRecord::new(
+            now,
+            env.temp.path().to_string_lossy().as_ref(),
+            command_raw,
+            "test revoke",
+            &redaction,
+            false,
+            None,
+        );
+        let allow_once = AllowOnceEntry::from_pending(
+            &pending,
+            now,
+            AllowOnceScopeKind::Cwd,
+            env.temp.path().to_string_lossy().as_ref(),
+            false,
+            false,
+            &redaction,
+        );
+        env.write_records(&pending, &allow_once);
+
+        let hash_prefix = &pending.full_hash[..8.min(pending.full_hash.len())];
+        let output = env.run(&["allow-once", "revoke", hash_prefix, "--yes", "--json"]);
+        assert!(
+            output.status.success(),
+            "revoke should succeed: stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON output");
+        assert_eq!(json["pending"]["removed"], 1);
+        assert_eq!(json["allow_once"]["removed"], 1);
+
+        let output_list = env.run(&["allow-once", "list", "--json"]);
+        assert!(output_list.status.success());
+        let json_list: serde_json::Value =
+            serde_json::from_slice(&output_list.stdout).expect("valid JSON output");
+        assert_eq!(json_list["pending"]["count"], 0);
+        assert_eq!(json_list["allow_once"]["count"], 0);
+    }
+
+    #[test]
+    fn allow_once_clear_all_wipes_stores() {
+        let env = AllowOnceEnv::new();
+        let now = fixed_timestamp();
+        let redaction = redaction_config();
+
+        let command_raw = r#"echo "abcdefghijklmnopqrstuvwxyz""#;
+        let pending = PendingExceptionRecord::new(
+            now,
+            env.temp.path().to_string_lossy().as_ref(),
+            command_raw,
+            "test clear",
+            &redaction,
+            false,
+            None,
+        );
+        let allow_once = AllowOnceEntry::from_pending(
+            &pending,
+            now,
+            AllowOnceScopeKind::Cwd,
+            env.temp.path().to_string_lossy().as_ref(),
+            false,
+            false,
+            &redaction,
+        );
+        env.write_records(&pending, &allow_once);
+
+        let output = env.run(&["allow-once", "clear", "--all", "--yes", "--json"]);
+        assert!(
+            output.status.success(),
+            "clear should succeed: stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON output");
+        assert_eq!(json["pending"]["wiped"], 1);
+        assert_eq!(json["allow_once"]["wiped"], 1);
+
+        let output_list = env.run(&["allow-once", "list", "--json"]);
+        assert!(output_list.status.success());
+        let json_list: serde_json::Value =
+            serde_json::from_slice(&output_list.stdout).expect("valid JSON output");
+        assert_eq!(json_list["pending"]["count"], 0);
+        assert_eq!(json_list["allow_once"]["count"], 0);
+    }
+}
+
+// ============================================================================
 // DCG SCAN Tests
 // ============================================================================
 
@@ -547,6 +774,11 @@ mod packs_tests {
 
 mod hook_mode_tests {
     use super::*;
+    use chrono::{DateTime, Utc};
+    use destructive_command_guard::logging::{RedactionConfig, RedactionMode};
+    use destructive_command_guard::pending_exceptions::{
+        AllowOnceEntry, AllowOnceScopeKind, PendingExceptionRecord,
+    };
 
     fn assert_hook_denies(command: &str) {
         let result = run_dcg_hook(command);
@@ -603,6 +835,236 @@ mod hook_mode_tests {
             "expected no stdout for allow\ncommand: {}\nstdout:\n{}\nstderr:\n{}",
             result.command,
             stdout,
+            result.stderr_str()
+        );
+    }
+
+    fn run_dcg_hook_in_dir_with_env(
+        cwd: &std::path::Path,
+        command: &str,
+        extra_env: &[(&str, &std::ffi::OsStr)],
+    ) -> HookRunOutput {
+        std::fs::create_dir_all(cwd.join(".git")).expect("failed to create .git dir");
+
+        let home_dir = cwd.join("home");
+        let xdg_config_dir = cwd.join("xdg_config");
+        std::fs::create_dir_all(&home_dir).expect("failed to create HOME dir");
+        std::fs::create_dir_all(&xdg_config_dir).expect("failed to create XDG_CONFIG_HOME dir");
+
+        let input = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": command,
+            }
+        });
+
+        let mut cmd = Command::new(dcg_binary());
+        cmd.env_clear()
+            .env("HOME", &home_dir)
+            .env("XDG_CONFIG_HOME", &xdg_config_dir)
+            .env("DCG_ALLOWLIST_SYSTEM_PATH", "")
+            .env("DCG_PACKS", "core.git,core.filesystem")
+            .current_dir(cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
+
+        let mut child = cmd.spawn().expect("failed to spawn dcg hook mode");
+
+        {
+            let stdin = child.stdin.as_mut().expect("failed to open stdin");
+            serde_json::to_writer(stdin, &input).expect("failed to write hook input JSON");
+        }
+
+        let output = child.wait_with_output().expect("failed to wait for dcg");
+
+        HookRunOutput {
+            command: command.to_string(),
+            output,
+        }
+    }
+
+    fn fixed_timestamp() -> DateTime<Utc> {
+        // Use a far-future timestamp so tests don't become time-sensitive as real time advances.
+        DateTime::parse_from_rfc3339("2099-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    const fn redaction_config() -> RedactionConfig {
+        RedactionConfig {
+            enabled: false,
+            mode: RedactionMode::Arguments,
+            max_argument_len: 8,
+        }
+    }
+
+    fn write_allow_once_entry(
+        allow_once_path: &std::path::Path,
+        cwd: &std::path::Path,
+        command: &str,
+        force_allow_config: bool,
+    ) {
+        let now = fixed_timestamp();
+        let redaction = redaction_config();
+        let cwd_str = cwd.to_string_lossy().into_owned();
+
+        let pending = PendingExceptionRecord::new(
+            now,
+            &cwd_str,
+            command,
+            "test pending",
+            &redaction,
+            false,
+            None,
+        );
+        let mut allow_once = AllowOnceEntry::from_pending(
+            &pending,
+            now,
+            AllowOnceScopeKind::Cwd,
+            &cwd_str,
+            false,
+            false,
+            &redaction,
+        );
+        allow_once.force_allow_config = force_allow_config;
+
+        let allow_once_line = serde_json::to_string(&allow_once).expect("serialize allow-once");
+        std::fs::write(allow_once_path, format!("{allow_once_line}\n"))
+            .expect("write allow-once jsonl");
+    }
+
+    fn assert_hook_denies_output(result: &HookRunOutput, expected_reason_substr: &str) {
+        let stdout = result.stdout_str();
+
+        assert!(
+            result.output.status.success(),
+            "hook mode should exit successfully\ncommand: {}\nstdout:\n{}\nstderr:\n{}",
+            result.command,
+            stdout,
+            result.stderr_str()
+        );
+
+        let json: serde_json::Value =
+            serde_json::from_str(stdout.trim()).expect("expected JSON stdout for deny");
+
+        assert_eq!(
+            json["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+            "expected permissionDecision=deny\ncommand: {}\nstdout:\n{}\nstderr:\n{}",
+            result.command,
+            stdout,
+            result.stderr_str()
+        );
+
+        let reason = json["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            reason.contains(expected_reason_substr),
+            "expected deny reason to contain {expected_reason_substr:?}\ncommand: {}\nstdout:\n{}\nstderr:\n{}",
+            result.command,
+            stdout,
+            result.stderr_str()
+        );
+    }
+
+    #[test]
+    fn hook_mode_allow_once_allows_pack_denied_command() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let allow_once_path = temp.path().join("allow_once.jsonl");
+        write_allow_once_entry(&allow_once_path, temp.path(), "git reset --hard", false);
+
+        let result = run_dcg_hook_in_dir_with_env(
+            temp.path(),
+            "git reset --hard",
+            &[("DCG_ALLOW_ONCE_PATH", allow_once_path.as_os_str())],
+        );
+
+        assert!(
+            result.output.status.success(),
+            "hook mode should exit successfully\nstdout:\n{}\nstderr:\n{}",
+            result.stdout_str(),
+            result.stderr_str()
+        );
+        assert!(
+            result.stdout_str().trim().is_empty(),
+            "expected allow (no stdout) due to allow-once\nstdout:\n{}\nstderr:\n{}",
+            result.stdout_str(),
+            result.stderr_str()
+        );
+    }
+
+    #[test]
+    fn hook_mode_allow_once_does_not_override_config_block_without_force() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let allow_once_path = temp.path().join("allow_once.jsonl");
+        write_allow_once_entry(&allow_once_path, temp.path(), "git reset --hard", false);
+
+        let config_path = temp.path().join("dcg.toml");
+        std::fs::write(
+            &config_path,
+            r"
+[overrides]
+block = [
+  { pattern = '\bgit\s+reset\s+--hard\b', reason = 'explicit config block' },
+]
+",
+        )
+        .expect("write dcg config");
+
+        let result = run_dcg_hook_in_dir_with_env(
+            temp.path(),
+            "git reset --hard",
+            &[
+                ("DCG_ALLOW_ONCE_PATH", allow_once_path.as_os_str()),
+                ("DCG_CONFIG", config_path.as_os_str()),
+            ],
+        );
+
+        assert_hook_denies_output(&result, "explicit config block");
+    }
+
+    #[test]
+    fn hook_mode_allow_once_can_override_config_block_with_force_flag() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let allow_once_path = temp.path().join("allow_once.jsonl");
+        write_allow_once_entry(&allow_once_path, temp.path(), "git reset --hard", true);
+
+        let config_path = temp.path().join("dcg.toml");
+        std::fs::write(
+            &config_path,
+            r"
+[overrides]
+block = [
+  { pattern = '\bgit\s+reset\s+--hard\b', reason = 'explicit config block' },
+]
+",
+        )
+        .expect("write dcg config");
+
+        let result = run_dcg_hook_in_dir_with_env(
+            temp.path(),
+            "git reset --hard",
+            &[
+                ("DCG_ALLOW_ONCE_PATH", allow_once_path.as_os_str()),
+                ("DCG_CONFIG", config_path.as_os_str()),
+            ],
+        );
+
+        assert!(
+            result.output.status.success(),
+            "hook mode should exit successfully\nstdout:\n{}\nstderr:\n{}",
+            result.stdout_str(),
+            result.stderr_str()
+        );
+        assert!(
+            result.stdout_str().trim().is_empty(),
+            "expected allow (no stdout) due to allow-once force flag\nstdout:\n{}\nstderr:\n{}",
+            result.stdout_str(),
             result.stderr_str()
         );
     }

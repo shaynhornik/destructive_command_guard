@@ -87,6 +87,79 @@ Evaluation:
 
 Compilation happens only when a pattern is actually evaluated.
 
+## Keyword Index + Candidate Pack Selection
+
+This section specifies the keyword gating semantics that the index must
+preserve. It applies to quick-reject and any future "candidate pack"
+pre-filter, and is designed to be **conservative** (never more restrictive
+than the legacy `pack.might_match`).
+
+### Executable spans (context classification)
+
+Keyword gating operates on **executable spans** only, derived from
+`context::classify_command()`:
+
+- The command is tokenized into spans tagged as `Executed`, `Argument`,
+  `InlineCode`, or `Comment`.
+- **Only `Executed` spans are searched for keywords.**
+  - This avoids keyword hits inside data-only arguments, comments, or inline
+    code examples.
+- If no executable spans are detected, keyword gating treats the command as
+  non-executable content and **quick-rejects** (safe to skip pack evaluation).
+
+### Word-boundary matching
+
+Keyword matching is **token-aware** within executable spans:
+
+- A keyword match is valid only when it respects word boundaries for ASCII
+  word characters (`[A-Za-z0-9_]`).
+- Boundary rules are based on the keyword itself:
+  - If the keyword begins with a word character, the preceding byte must be
+    non-word or span start.
+  - If the keyword ends with a word character, the following byte must be
+    non-word or span end.
+  - Keywords that begin/end with non-word characters do **not** require a
+    boundary on that side (e.g., `/usr/bin/git` or `--flag`).
+- Substring matches inside longer tokens **do not** count
+  (e.g., `"cat .gitignore"` does not match `git`).
+
+### Candidate pack selection (superset rule)
+
+Candidate selection must be **no more restrictive** than the current
+`pack.might_match` behavior. It may be more permissive, but never stricter:
+
+1. **Fast substring prefilter (optional)**: use SIMD substring search across
+   the raw command to avoid expensive classification when no keywords appear.
+2. **Normalized executable scan**: if any keyword survives the span + boundary
+   checks, **include** that pack in the candidate set.
+3. **Superset guarantee**: if `pack.might_match(cmd)` would return `true`,
+   the candidate set **must include** that pack.
+
+### Normalization + fallback behavior
+
+Keyword gating should run on a **normalized** view of the command:
+
+- Strip wrapper prefixes (`sudo`, `env`, `command`, leading backslash).
+- Dequote only **executed command words** (arguments remain untouched).
+- Strip common absolute paths (`/usr/bin/git` → `git`).
+
+Fallbacks must remain conservative:
+
+- If **no keywords are configured**, do **not** quick-reject; evaluate packs.
+- If normalization produces an **owned** string (wrapper stripped/dequoted),
+  use the normalized value for scanning.
+- If normalization cannot safely slice (e.g., tokenizer failure),
+  treat the original command as the scan source (fail open).
+
+### Validation mapping
+
+Add tests that explicitly assert:
+
+- Word-boundary semantics (`git` vs `gitignore`, `/usr/bin/git`).
+- Executable-span filtering (keywords in comments/strings do not match).
+- Candidate-pack superset behavior vs `pack.might_match`.
+- Empty keyword list disables quick-reject.
+
 ## Isomorphism Guarantees
 
 1) **Ordering unchanged**

@@ -4,7 +4,7 @@
 //! - Stopping/removing Traefik containers
 //! - Deleting Traefik configuration files
 //! - Traefik API DELETE operations
-//! - Removing Traefik IngressRoute CRDs
+//! - Removing Traefik `IngressRoute` CRDs
 
 use crate::packs::{DestructivePattern, Pack, SafePattern};
 use crate::{destructive_pattern, safe_pattern};

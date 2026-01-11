@@ -597,8 +597,9 @@ pub fn scan_paths(
     let started = std::time::Instant::now();
 
     let mut files: Vec<PathBuf> = Vec::new();
+    let mut visited: HashSet<PathBuf> = HashSet::new();
     for path in paths {
-        collect_files_recursively(path, &mut files);
+        collect_files_recursively(path, &mut files, &mut visited);
     }
 
     files.sort();
@@ -758,7 +759,20 @@ pub fn scan_paths(
         elapsed_ms,
     ))
 }
-fn collect_files_recursively(path: &PathBuf, out: &mut Vec<PathBuf>) {
+fn collect_files_recursively(
+    path: &PathBuf,
+    out: &mut Vec<PathBuf>,
+    visited: &mut HashSet<PathBuf>,
+) {
+    // Resolve symlinks to prevent infinite loops from circular symlinks
+    let Ok(canonical) = std::fs::canonicalize(path) else {
+        return;
+    };
+
+    if !visited.insert(canonical) {
+        return;
+    }
+
     let Ok(meta) = std::fs::metadata(path) else {
         return;
     };
@@ -781,7 +795,7 @@ fn collect_files_recursively(path: &PathBuf, out: &mut Vec<PathBuf>) {
     entries.sort();
 
     for entry in entries {
-        collect_files_recursively(&entry, out);
+        collect_files_recursively(&entry, out, visited);
     }
 }
 

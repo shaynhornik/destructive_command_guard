@@ -64,8 +64,8 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         ),
         // ec2 delete-* commands
         destructive_pattern!(
-            "ec2-delete",
-            r"aws\s+ec2\s+delete-(?:snapshot|volume|vpc|subnet|security-group)",
+            "removes AWS resources",
+            r"aws\s+ec2\s+delete-(?:snapshot|volume|vpc|subnet|security-group|key-pair|image)",
             "aws ec2 delete-* permanently removes AWS resources."
         ),
         // s3 rm --recursive
@@ -89,7 +89,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // rds delete-db-instance
         destructive_pattern!(
             "rds-delete",
-            r"aws\s+rds\s+delete-db-(?:instance|cluster)",
+            r"aws\s+rds\s+delete-db-(?:instance|cluster|snapshot|cluster-snapshot)",
             "aws rds delete-db-instance/cluster permanently destroys the database."
         ),
         // cloudformation delete-stack
@@ -159,6 +159,31 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
 mod tests {
     use super::*;
     use crate::packs::test_helpers::*;
+
+    #[test]
+    fn ec2_and_rds_patterns_block() {
+        let pack = create_pack();
+        assert_blocks(
+            &pack,
+            "aws ec2 delete-key-pair --key-name my-key",
+            "removes AWS resources",
+        );
+        assert_blocks(
+            &pack,
+            "aws ec2 delete-image --image-id ami-12345678",
+            "removes AWS resources",
+        );
+        assert_blocks(
+            &pack,
+            "aws rds delete-db-snapshot --db-snapshot-identifier my-snapshot",
+            "destroys the database",
+        );
+        assert_blocks(
+            &pack,
+            "aws rds delete-db-cluster-snapshot --db-cluster-snapshot-identifier my-cluster-snapshot",
+            "destroys the database",
+        );
+    }
 
     #[test]
     fn ecr_and_logs_patterns_block() {

@@ -48,6 +48,19 @@ pub struct HookSpecificOutput<'a> {
     /// Human-readable explanation of the decision.
     #[serde(rename = "permissionDecisionReason")]
     pub permission_decision_reason: Cow<'a, str>,
+    /// Short allow-once code (if a pending exception was recorded).
+    #[serde(rename = "allowOnceCode", skip_serializing_if = "Option::is_none")]
+    pub allow_once_code: Option<String>,
+    /// Full hash for allow-once disambiguation (if available).
+    #[serde(rename = "allowOnceFullHash", skip_serializing_if = "Option::is_none")]
+    pub allow_once_full_hash: Option<String>,
+}
+
+/// Allow-once metadata for denial output.
+#[derive(Debug, Clone)]
+pub struct AllowOnceInfo {
+    pub code: String,
+    pub full_hash: String,
 }
 
 /// Result of processing a hook request.
@@ -147,6 +160,10 @@ pub fn format_denial_message(command: &str, reason: &str) -> String {
     )
 }
 
+fn allow_once_header_line(code: &str) -> String {
+    format!("ALLOW-24H CODE: {code} | run: dcg allow-once {code}")
+}
+
 /// Print a colorful warning to stderr for human visibility.
 #[allow(clippy::too_many_lines)]
 pub fn print_colorful_warning(
@@ -154,6 +171,7 @@ pub fn print_colorful_warning(
     reason: &str,
     pack: Option<&str>,
     pattern: Option<&str>,
+    allow_once_code: Option<&str>,
 ) {
     // Box width (content area, excluding border characters)
     const WIDTH: usize = 70;
@@ -161,6 +179,9 @@ pub fn print_colorful_warning(
     let stderr = io::stderr();
     let mut handle = stderr.lock();
 
+    if let Some(code) = allow_once_code {
+        let _ = writeln!(handle, "{}", allow_once_header_line(code));
+    }
     let _ = writeln!(handle);
 
     // Top border with corners
@@ -459,9 +480,16 @@ fn print_contextual_suggestion_boxed(handle: &mut io::StderrLock<'_>, command: &
 /// Output a denial response to stdout (JSON for hook protocol).
 #[cold]
 #[inline(never)]
-pub fn output_denial(command: &str, reason: &str, pack: Option<&str>, pattern: Option<&str>) {
+pub fn output_denial(
+    command: &str,
+    reason: &str,
+    pack: Option<&str>,
+    pattern: Option<&str>,
+    allow_once: Option<&AllowOnceInfo>,
+) {
     // Print colorful warning to stderr (visible to user)
-    print_colorful_warning(command, reason, pack, pattern);
+    let allow_once_code = allow_once.map(|info| info.code.as_str());
+    print_colorful_warning(command, reason, pack, pattern, allow_once_code);
 
     // Build JSON response for hook protocol (stdout)
     let message = format_denial_message(command, reason);
@@ -471,6 +499,8 @@ pub fn output_denial(command: &str, reason: &str, pack: Option<&str>, pattern: O
             hook_event_name: "PreToolUse",
             permission_decision: "deny",
             permission_decision_reason: Cow::Owned(message),
+            allow_once_code: allow_once.map(|info| info.code.clone()),
+            allow_once_full_hash: allow_once.map(|info| info.full_hash.clone()),
         },
     };
 
@@ -655,6 +685,8 @@ mod tests {
                 hook_event_name: "PreToolUse",
                 permission_decision: "deny",
                 permission_decision_reason: Cow::Borrowed("test reason"),
+                allow_once_code: None,
+                allow_once_full_hash: None,
             },
         };
         let json = serde_json::to_string(&output).unwrap();
@@ -664,11 +696,35 @@ mod tests {
     }
 
     #[test]
+    fn test_hook_output_serialization_with_allow_once() {
+        let output = HookOutput {
+            hook_specific_output: HookSpecificOutput {
+                hook_event_name: "PreToolUse",
+                permission_decision: "deny",
+                permission_decision_reason: Cow::Borrowed("test reason"),
+                allow_once_code: Some("abcd".to_string()),
+                allow_once_full_hash: Some("deadbeef".to_string()),
+            },
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        assert!(json.contains("allowOnceCode"));
+        assert!(json.contains("abcd"));
+        assert!(json.contains("allowOnceFullHash"));
+        assert!(json.contains("deadbeef"));
+    }
+
+    #[test]
     fn test_format_denial_message() {
         let msg = format_denial_message("git reset --hard", "destroys uncommitted changes");
         assert!(msg.contains("git reset --hard"));
         assert!(msg.contains("destroys uncommitted changes"));
         assert!(msg.contains("BLOCKED"));
+    }
+
+    #[test]
+    fn test_allow_once_header_line() {
+        let line = allow_once_header_line("abcd");
+        assert_eq!(line, "ALLOW-24H CODE: abcd | run: dcg allow-once abcd");
     }
 
     #[test]
@@ -682,7 +738,7 @@ mod tests {
             "Chinese test string must be >50 chars, got {}",
             long_chinese.chars().count()
         );
-        print_colorful_warning(long_chinese, "test reason", Some("test.pack"), None);
+        print_colorful_warning(long_chinese, "test reason", Some("test.pack"), None, None);
 
         // Japanese characters - also >50 chars
         let long_japanese = "rm -rf /home/ユーザー/ドキュメント/フォルダ/サブフォルダ/ファイル/もっとフォルダ/最後/追加パス";
@@ -691,7 +747,7 @@ mod tests {
             "Japanese test string must be >50 chars, got {}",
             long_japanese.chars().count()
         );
-        print_colorful_warning(long_japanese, "test reason", None, None);
+        print_colorful_warning(long_japanese, "test reason", None, None, None);
 
         // Mixed ASCII and emoji (emoji are 4 bytes) - >50 chars
         let long_emoji = "echo 🎉🎊🎈🎁🎀🎄🎃🎂🎆🎇🧨✨🎍🎎🎏🎐🎑🧧🎀🎁🎗🎟🎫🎖🏆🏅🥇🥈🥉⚽️🏀🏈⚾️🥎🎾🏐🏉🥏🎱🪀🏓🏸🥊🥋";
@@ -700,6 +756,6 @@ mod tests {
             "Emoji test string must be >50 chars, got {}",
             long_emoji.chars().count()
         );
-        print_colorful_warning(long_emoji, "test reason", Some("emoji.pack"), None);
+        print_colorful_warning(long_emoji, "test reason", Some("emoji.pack"), None, None);
     }
 }

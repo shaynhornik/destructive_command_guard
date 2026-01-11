@@ -57,7 +57,7 @@ rule_id = "core.git:stash-clear"
 description = "git branch -D force deletes"
 command = "git branch -D feature-branch"
 expected = "deny"
-rule_id = "core.git:branch-force"
+rule_id = "core.git:branch-force-delete"
 
 [[case]]
 description = "git push --force"

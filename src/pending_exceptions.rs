@@ -160,7 +160,7 @@ impl PendingExceptionRecord {
 }
 
 /// Maintenance stats produced while loading/pruning.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct PendingMaintenance {
     pub pruned_expired: usize,
     pub pruned_consumed: usize,
@@ -257,6 +257,59 @@ impl PendingExceptionStore {
         Ok((active, maintenance))
     }
 
+    /// Load active records without rewriting the store file.
+    ///
+    /// This is useful for "preview" operations that want to display what would
+    /// change before mutating on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns any I/O errors encountered while opening or locking the store file.
+    pub fn preview_active(
+        &self,
+        now: DateTime<Utc>,
+    ) -> io::Result<(Vec<PendingExceptionRecord>, PendingMaintenance)> {
+        let mut file = open_locked(&self.path)?;
+        let (active, maintenance) = load_active_from_file(&mut file, now);
+        Ok((active, maintenance))
+    }
+
+    /// Remove all active records (expired/consumed are also pruned).
+    ///
+    /// # Errors
+    ///
+    /// Returns any I/O errors encountered while opening, locking, or writing the store file.
+    pub fn clear_all(&self, now: DateTime<Utc>) -> io::Result<(usize, PendingMaintenance)> {
+        let mut file = open_locked(&self.path)?;
+        let (active, maintenance) = load_active_from_file(&mut file, now);
+        let removed = active.len();
+        rewrite_records(&mut file, &[])?;
+        Ok((removed, maintenance))
+    }
+
+    /// Remove active records matching a full hash (expired/consumed are also pruned).
+    ///
+    /// # Errors
+    ///
+    /// Returns any I/O errors encountered while opening, locking, or writing the store file.
+    pub fn remove_by_full_hash(
+        &self,
+        full_hash: &str,
+        now: DateTime<Utc>,
+    ) -> io::Result<(usize, PendingMaintenance)> {
+        let mut file = open_locked(&self.path)?;
+        let (mut active, maintenance) = load_active_from_file(&mut file, now);
+        let before = active.len();
+        active.retain(|record| record.full_hash != full_hash);
+        let removed = before - active.len();
+
+        if removed > 0 || maintenance.pruned_expired > 0 || maintenance.pruned_consumed > 0 {
+            rewrite_records(&mut file, &active)?;
+        }
+
+        Ok((removed, maintenance))
+    }
+
     /// Load active records matching a short code.
     ///
     /// # Errors
@@ -327,6 +380,91 @@ impl AllowOnceStore {
 
         append_allow_once_record(&mut file, entry)?;
         Ok(maintenance)
+    }
+
+    /// Load active allow-once entries and prune expired/consumed entries from disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns any I/O errors encountered while opening, locking, or writing the store file.
+    pub fn load_active(
+        &self,
+        now: DateTime<Utc>,
+    ) -> io::Result<(Vec<AllowOnceEntry>, PendingMaintenance)> {
+        if !self.path.exists() {
+            return Ok((Vec::new(), PendingMaintenance::default()));
+        }
+
+        let mut file = open_locked(&self.path)?;
+        let (active, maintenance) = load_allow_once_from_file(&mut file, now);
+
+        if maintenance.pruned_expired > 0 || maintenance.pruned_consumed > 0 {
+            rewrite_allow_once_records(&mut file, &active)?;
+        }
+
+        Ok((active, maintenance))
+    }
+
+    /// Load active allow-once entries without rewriting the store file.
+    ///
+    /// # Errors
+    ///
+    /// Returns any I/O errors encountered while opening or locking the store file.
+    pub fn preview_active(
+        &self,
+        now: DateTime<Utc>,
+    ) -> io::Result<(Vec<AllowOnceEntry>, PendingMaintenance)> {
+        if !self.path.exists() {
+            return Ok((Vec::new(), PendingMaintenance::default()));
+        }
+
+        let mut file = open_locked(&self.path)?;
+        let (active, maintenance) = load_allow_once_from_file(&mut file, now);
+        Ok((active, maintenance))
+    }
+
+    /// Remove all active allow-once entries (expired/consumed are also pruned).
+    ///
+    /// # Errors
+    ///
+    /// Returns any I/O errors encountered while opening, locking, or writing the store file.
+    pub fn clear_all(&self, now: DateTime<Utc>) -> io::Result<(usize, PendingMaintenance)> {
+        if !self.path.exists() {
+            return Ok((0, PendingMaintenance::default()));
+        }
+
+        let mut file = open_locked(&self.path)?;
+        let (active, maintenance) = load_allow_once_from_file(&mut file, now);
+        let removed = active.len();
+        rewrite_allow_once_records(&mut file, &[])?;
+        Ok((removed, maintenance))
+    }
+
+    /// Remove active allow-once entries matching a source full hash (expired/consumed are also pruned).
+    ///
+    /// # Errors
+    ///
+    /// Returns any I/O errors encountered while opening, locking, or writing the store file.
+    pub fn remove_by_source_full_hash(
+        &self,
+        full_hash: &str,
+        now: DateTime<Utc>,
+    ) -> io::Result<(usize, PendingMaintenance)> {
+        if !self.path.exists() {
+            return Ok((0, PendingMaintenance::default()));
+        }
+
+        let mut file = open_locked(&self.path)?;
+        let (mut active, maintenance) = load_allow_once_from_file(&mut file, now);
+        let before = active.len();
+        active.retain(|entry| entry.source_full_hash != full_hash);
+        let removed = before - active.len();
+
+        if removed > 0 || maintenance.pruned_expired > 0 || maintenance.pruned_consumed > 0 {
+            rewrite_allow_once_records(&mut file, &active)?;
+        }
+
+        Ok((removed, maintenance))
     }
 
     /// Match a command against active allow-once entries.
@@ -406,6 +544,33 @@ pub fn log_maintenance(
         "[{timestamp}] [pending-exceptions] {context}: pruned_expired={}, pruned_consumed={}, parse_errors={}",
         maintenance.pruned_expired, maintenance.pruned_consumed, maintenance.parse_errors
     )?;
+    Ok(())
+}
+
+/// Log an allow-once management action (best-effort).
+///
+/// This uses the same log file path expansion rules as [`log_maintenance`].
+///
+/// # Errors
+///
+/// Returns any I/O errors encountered while opening or appending to the log file.
+pub fn log_allow_once_action(log_file: &str, action: &str, details: &str) -> io::Result<()> {
+    let path = if log_file.starts_with("~/") {
+        std::env::var_os("HOME").map_or_else(
+            || PathBuf::from(log_file),
+            |home| PathBuf::from(format!("{}{}", home.to_string_lossy(), &log_file[1..])),
+        )
+    } else {
+        PathBuf::from(log_file)
+    };
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let timestamp = format_timestamp(Utc::now());
+    writeln!(file, "[{timestamp}] [allow-once] {action}: {details}")?;
     Ok(())
 }
 
@@ -797,5 +962,185 @@ mod tests {
         let cwd = Path::new("/repo/subdir");
         let matched = store.match_command("git status", cwd, now).unwrap();
         assert!(matched.is_some());
+    }
+
+    #[test]
+    fn test_full_hash_derivation_is_stable_and_lowercase() {
+        let hash = compute_full_hash("2099-01-01T00:00:00Z", "/repo", "git status");
+        assert_eq!(
+            hash,
+            "17a268f67ce0aab3bc5015427e3ba8fd1d643d25f9f13dca1332c13818a5ac63"
+        );
+        assert_eq!(hash, hash.to_lowercase());
+        assert_eq!(short_code_from_hash(&hash), "ac63");
+    }
+
+    #[test]
+    fn test_allow_once_reusable_until_expiry() {
+        let dir = TempDir::new().expect("tempdir");
+        let allow_path = dir.path().join("allow_once.jsonl");
+        let store = AllowOnceStore::new(allow_path.clone());
+        let now = DateTime::parse_from_rfc3339("2026-01-10T06:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let redaction = redaction_config();
+
+        let pending =
+            PendingExceptionRecord::new(now, "/repo", "git status", "ok", &redaction, false, None);
+        let entry = AllowOnceEntry::from_pending(
+            &pending,
+            now,
+            AllowOnceScopeKind::Cwd,
+            "/repo",
+            false,
+            false,
+            &redaction,
+        );
+        store.add_entry(&entry, now).unwrap();
+
+        let cwd = Path::new("/repo");
+        assert!(
+            store
+                .match_command("git status", cwd, now)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .match_command("git status", cwd, now)
+                .unwrap()
+                .is_some()
+        );
+
+        let contents = std::fs::read_to_string(&allow_path).unwrap();
+        assert_eq!(contents.lines().count(), 1);
+    }
+
+    #[test]
+    fn test_allow_once_scope_mismatch_does_not_allow() {
+        let dir = TempDir::new().expect("tempdir");
+        let allow_path = dir.path().join("allow_once.jsonl");
+        let store = AllowOnceStore::new(allow_path);
+        let now = DateTime::parse_from_rfc3339("2026-01-10T06:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let redaction = redaction_config();
+
+        let pending =
+            PendingExceptionRecord::new(now, "/repo", "git status", "ok", &redaction, false, None);
+        let entry = AllowOnceEntry::from_pending(
+            &pending,
+            now,
+            AllowOnceScopeKind::Cwd,
+            "/repo",
+            false,
+            false,
+            &redaction,
+        );
+        store.add_entry(&entry, now).unwrap();
+
+        let cwd = Path::new("/different");
+        assert!(
+            store
+                .match_command("git status", cwd, now)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_allow_once_load_active_prunes_expired_and_consumed() {
+        let dir = TempDir::new().expect("tempdir");
+        let allow_path = dir.path().join("allow_once.jsonl");
+        let store = AllowOnceStore::new(allow_path.clone());
+        let now = DateTime::parse_from_rfc3339("2026-01-10T06:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let redaction = redaction_config();
+
+        let pending =
+            PendingExceptionRecord::new(now, "/repo", "git status", "ok", &redaction, false, None);
+
+        let active = AllowOnceEntry::from_pending(
+            &pending,
+            now,
+            AllowOnceScopeKind::Cwd,
+            "/repo",
+            false,
+            false,
+            &redaction,
+        );
+
+        let mut expired = AllowOnceEntry::from_pending(
+            &pending,
+            now,
+            AllowOnceScopeKind::Cwd,
+            "/repo",
+            false,
+            false,
+            &redaction,
+        );
+        expired.expires_at = format_timestamp(now - Duration::hours(1));
+
+        let mut consumed = AllowOnceEntry::from_pending(
+            &pending,
+            now,
+            AllowOnceScopeKind::Cwd,
+            "/repo",
+            true,
+            false,
+            &redaction,
+        );
+        consumed.consumed_at = Some(format_timestamp(now));
+
+        let contents = format!(
+            "{}\n{}\n{}\n",
+            serde_json::to_string(&active).unwrap(),
+            serde_json::to_string(&expired).unwrap(),
+            serde_json::to_string(&consumed).unwrap()
+        );
+        std::fs::write(&allow_path, contents).unwrap();
+
+        let (entries, maintenance) = store.load_active(now).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(maintenance.pruned_expired, 1);
+        assert_eq!(maintenance.pruned_consumed, 1);
+
+        let rewritten = std::fs::read_to_string(&allow_path).unwrap();
+        assert_eq!(rewritten.lines().count(), 1);
+    }
+
+    #[test]
+    fn test_pending_lookup_by_code_returns_multiple_on_collision() {
+        let (store, _dir) = make_store();
+        let now = DateTime::parse_from_rfc3339("2026-01-10T06:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let redaction = redaction_config();
+
+        let record_a =
+            PendingExceptionRecord::new(now, "/repo", "git status", "ok", &redaction, false, None);
+        let mut record_b = PendingExceptionRecord::new(
+            now,
+            "/repo",
+            "git reset --hard",
+            "blocked",
+            &redaction,
+            false,
+            None,
+        );
+
+        // Force a short-code collision (real collisions are unlikely; we want deterministic coverage).
+        record_b.short_code = record_a.short_code.clone();
+
+        let contents = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&record_a).unwrap(),
+            serde_json::to_string(&record_b).unwrap()
+        );
+        std::fs::write(store.path(), contents).unwrap();
+
+        let (matches, _maintenance) = store.lookup_by_code(&record_a.short_code, now).unwrap();
+        assert_eq!(matches.len(), 2);
     }
 }
