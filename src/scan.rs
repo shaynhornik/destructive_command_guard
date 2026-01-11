@@ -2422,7 +2422,7 @@ fn extract_docker_compose_command(
     if let Some(items) = parse_inline_yaml_sequence(value) {
         // Join array elements to form the command
         let cmd = items.join(" ");
-        if enabled_keywords.iter().any(|kw| cmd.contains(kw)) {
+        if enabled_keywords.is_empty() || enabled_keywords.iter().any(|kw| cmd.contains(kw)) {
             out.push(ExtractedCommand {
                 file: file.to_string(),
                 line: line_no,
@@ -2476,7 +2476,7 @@ fn extract_docker_compose_command(
 
         if !cmd_parts.is_empty() {
             let cmd = cmd_parts.join(" ");
-            if enabled_keywords.iter().any(|kw| cmd.contains(kw)) {
+            if enabled_keywords.is_empty() || enabled_keywords.iter().any(|kw| cmd.contains(kw)) {
                 out.push(ExtractedCommand {
                     file: file.to_string(),
                     line: line_no,
@@ -2493,7 +2493,7 @@ fn extract_docker_compose_command(
     // Handle inline string: command: /bin/sh -c "rm -rf /"
     // Strip quotes if present
     let cmd = value.trim_matches('"').trim_matches('\'').to_string();
-    if enabled_keywords.iter().any(|kw| cmd.contains(kw)) {
+    if enabled_keywords.is_empty() || enabled_keywords.iter().any(|kw| cmd.contains(kw)) {
         out.push(ExtractedCommand {
             file: file.to_string(),
             line: line_no,
@@ -3863,6 +3863,18 @@ services:
     command: ["sh", "-c", "rm -rf /cache"]
 "#;
         let extracted = extract_docker_compose_from_str("docker-compose.yml", content, &["rm"]);
+        assert_eq!(extracted.len(), 1);
+        assert!(extracted[0].command.contains("rm"));
+    }
+
+    #[test]
+    fn docker_compose_extracts_array_command_without_keywords() {
+        let content = r#"
+services:
+  app:
+    command: ["sh", "-c", "rm -rf /cache"]
+"#;
+        let extracted = extract_docker_compose_from_str("docker-compose.yml", content, &[]);
         assert_eq!(extracted.len(), 1);
         assert!(extracted[0].command.contains("rm"));
     }
