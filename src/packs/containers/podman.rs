@@ -65,17 +65,19 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
             r"podman\s+pod\s+prune",
             "podman pod prune removes ALL stopped pods."
         ),
-        // image prune - removes unused images
+        // image prune - removes unused images (Medium: only affects unused images)
         destructive_pattern!(
             "image-prune",
             r"podman\s+image\s+prune",
-            "podman image prune removes unused images. Use 'podman images' to review first."
+            "podman image prune removes unused images. Use 'podman images' to review first.",
+            Medium
         ),
-        // container prune - removes stopped containers
+        // container prune - removes stopped containers (Medium: only affects stopped)
         destructive_pattern!(
             "container-prune",
             r"podman\s+container\s+prune",
-            "podman container prune removes ALL stopped containers."
+            "podman container prune removes ALL stopped containers.",
+            Medium
         ),
         // rm -f (force remove containers)
         destructive_pattern!(

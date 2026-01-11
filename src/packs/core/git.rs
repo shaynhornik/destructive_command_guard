@@ -118,19 +118,19 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
             "Force push (-f) can destroy remote history. Use --force-with-lease if necessary.",
             Critical
         ),
-        // branch -D/-f force deletes or overwrites without checks
+        // branch -D/-f force deletes or overwrites without checks (Medium: recoverable via reflog)
         destructive_pattern!(
             "branch-force-delete",
             r"git\s+(?:\S+\s+)*branch\s+.*(?:-D\b|--force\b|-f\b)",
-            "git branch -D/--force overwrites or deletes branches without checks.",
-            High
+            "git branch -D/--force deletes branches without checks. Recoverable via 'git reflog'.",
+            Medium
         ),
-        // stash destruction
+        // stash destruction (Medium: single stash, recoverable via reflog)
         destructive_pattern!(
             "stash-drop",
             r"git\s+(?:\S+\s+)*stash\s+drop",
-            "git stash drop permanently deletes stashed changes. List stashes first.",
-            High
+            "git stash drop deletes a single stash. Recoverable via 'git fsck --unreachable'.",
+            Medium
         ),
         // stash clear destroys ALL stashes (CRITICAL)
         destructive_pattern!(
@@ -253,21 +253,23 @@ mod tests {
     }
 
     #[test]
-    fn test_branch_force_high() {
+    fn test_branch_force_medium() {
+        // Branch force delete is Medium severity (recoverable via reflog)
         let pack = create_pack();
 
-        assert_blocks_with_severity(&pack, "git branch -D feature", Severity::High);
+        assert_blocks_with_severity(&pack, "git branch -D feature", Severity::Medium);
         assert_blocks_with_pattern(&pack, "git branch -D feature", "branch-force-delete");
         assert_blocks_with_pattern(&pack, "git branch --force feature", "branch-force-delete");
         assert_blocks_with_pattern(&pack, "git branch -f feature", "branch-force-delete");
     }
 
     #[test]
-    fn test_stash_drop_high() {
+    fn test_stash_drop_medium() {
+        // Stash drop is Medium severity (recoverable via fsck)
         let pack = create_pack();
 
-        assert_blocks_with_severity(&pack, "git stash drop", Severity::High);
-        assert_blocks(&pack, "git stash drop stash@{0}", "permanently deletes");
+        assert_blocks_with_severity(&pack, "git stash drop", Severity::Medium);
+        assert_blocks(&pack, "git stash drop stash@{0}", "Recoverable");
     }
 
     // =========================================================================

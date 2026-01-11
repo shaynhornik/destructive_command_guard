@@ -531,10 +531,26 @@ fn resolve_project_path(
     std::env::current_dir().ok()
 }
 
-fn allow_once_match(command: &str) -> Option<crate::pending_exceptions::AllowOnceEntry> {
+fn allow_once_match(
+    command: &str,
+    allow_once_audit: Option<&crate::pending_exceptions::AllowOnceAuditConfig<'_>>,
+) -> Option<crate::pending_exceptions::AllowOnceEntry> {
     let cwd = std::env::current_dir().ok()?;
     let store = AllowOnceStore::new(AllowOnceStore::default_path(Some(&cwd)));
-    match store.match_command(command, &cwd, Utc::now()) {
+    match store.match_command(command, &cwd, Utc::now(), allow_once_audit) {
+        Ok(Some(entry)) => Some(entry),
+        _ => None,
+    }
+}
+
+#[allow(dead_code)]
+fn allow_once_match_force_config(
+    command: &str,
+    allow_once_audit: Option<&crate::pending_exceptions::AllowOnceAuditConfig<'_>>,
+) -> Option<crate::pending_exceptions::AllowOnceEntry> {
+    let cwd = std::env::current_dir().ok()?;
+    let store = AllowOnceStore::new(AllowOnceStore::default_path(Some(&cwd)));
+    match store.match_command_force_config(command, &cwd, Utc::now(), allow_once_audit) {
         Ok(Some(entry)) => Some(entry),
         _ => None,
     }
@@ -565,6 +581,7 @@ pub fn evaluate_command_with_deadline(
         compiled_overrides,
         allowlists,
         &heredoc_settings,
+        None,
         deadline,
     )
 }
@@ -625,6 +642,7 @@ pub fn evaluate_command_with_pack_order_at_path(
         compiled_overrides,
         allowlists,
         heredoc_settings,
+        None,
         project_path,
         None,
     )
@@ -658,6 +676,7 @@ pub fn evaluate_command_with_pack_order_deadline(
     compiled_overrides: &crate::config::CompiledOverrides,
     allowlists: &LayeredAllowlist,
     heredoc_settings: &crate::config::HeredocSettings,
+    allow_once_audit: Option<&crate::pending_exceptions::AllowOnceAuditConfig<'_>>,
     deadline: Option<&Deadline>,
 ) -> EvaluationResult {
     evaluate_command_with_pack_order_deadline_at_path(
@@ -668,6 +687,7 @@ pub fn evaluate_command_with_pack_order_deadline(
         compiled_overrides,
         allowlists,
         heredoc_settings,
+        allow_once_audit,
         None,
         deadline,
     )
@@ -685,6 +705,7 @@ pub fn evaluate_command_with_pack_order_deadline_at_path(
     compiled_overrides: &crate::config::CompiledOverrides,
     allowlists: &LayeredAllowlist,
     heredoc_settings: &crate::config::HeredocSettings,
+    allow_once_audit: Option<&crate::pending_exceptions::AllowOnceAuditConfig<'_>>,
     project_path: Option<&Path>,
     deadline: Option<&Deadline>,
 ) -> EvaluationResult {
@@ -703,21 +724,16 @@ pub fn evaluate_command_with_pack_order_deadline_at_path(
         return EvaluationResult::allowed();
     }
 
-    // Step 1.5: Check allow-once overrides (may be superseded by config blocklist).
-    let allow_once = allow_once_match(command);
-
-    // Step 2: Check precompiled block overrides
+    // Step 1.5: Check precompiled block overrides (allow-once may optionally override).
     if let Some(reason) = compiled_overrides.check_block(command) {
-        if allow_once
-            .as_ref()
-            .is_some_and(|entry| entry.force_allow_config)
-        {
+        if allow_once_match_force_config(command, allow_once_audit).is_some() {
             return EvaluationResult::allowed();
         }
         return EvaluationResult::denied_by_config(reason.to_string());
     }
 
-    if allow_once.is_some() {
+    // Step 1.6: Check allow-once overrides.
+    if allow_once_match(command, allow_once_audit).is_some() {
         return EvaluationResult::allowed();
     }
 
@@ -757,6 +773,7 @@ pub fn evaluate_command_with_pack_order_deadline_at_path(
                     ordered_packs,
                     keyword_index,
                     compiled_overrides,
+                    allow_once_audit,
                 };
                 if let Some(blocked) =
                     evaluate_heredoc(command, context, &mut heredoc_allowlist_hit)
@@ -982,10 +999,8 @@ fn evaluate_packs_with_allowlists(
                 return EvaluationResult::allowed_due_to_budget();
             }
 
-            // Until warn/log are fully surfaced, match only deny-by-default patterns.
-            if !pattern.severity.blocks_by_default() {
-                continue;
-            }
+            // All severity levels are now evaluated. The policy layer in main.rs
+            // determines whether to deny, warn, or log based on severity and config.
 
             let matched_span = pattern
                 .regex
@@ -1086,7 +1101,7 @@ where
     }
 
     // Step 1.5: Check allow-once overrides (may be superseded by config blocklist).
-    let allow_once = allow_once_match(command);
+    let allow_once = allow_once_match(command, None);
 
     // Step 2: Check precompiled block overrides
     if let Some(reason) = compiled_overrides.check_block(command) {
@@ -1135,6 +1150,7 @@ where
                 ordered_packs: &ordered_packs,
                 keyword_index: keyword_index.as_ref(),
                 compiled_overrides,
+                allow_once_audit: None,
             };
             if let Some(blocked) = evaluate_heredoc(command, context, &mut heredoc_allowlist_hit) {
                 return blocked;
@@ -1211,6 +1227,7 @@ struct HeredocEvaluationContext<'a> {
     ordered_packs: &'a [String],
     keyword_index: Option<&'a crate::packs::EnabledKeywordIndex>,
     compiled_overrides: &'a crate::config::CompiledOverrides,
+    allow_once_audit: Option<&'a crate::pending_exceptions::AllowOnceAuditConfig<'a>>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1378,6 +1395,7 @@ fn evaluate_heredoc(
                     context.compiled_overrides,
                     context.allowlists,
                     context.heredoc_settings,
+                    context.allow_once_audit,
                     context.project_path,
                     context.deadline,
                 );
@@ -2365,6 +2383,7 @@ mod tests {
                 &compiled_overrides,
                 &allowlists,
                 &heredoc_settings,
+                None,
                 Some(&deadline),
             );
 
@@ -2400,6 +2419,7 @@ mod tests {
                 &compiled_overrides,
                 &allowlists,
                 &heredoc_settings,
+                None,
                 Some(&deadline),
             );
 
@@ -2432,6 +2452,7 @@ mod tests {
                 &compiled_overrides,
                 &allowlists,
                 &heredoc_settings,
+                None,
                 None, // No deadline
             );
 
@@ -2467,6 +2488,7 @@ mod tests {
                 &compiled_overrides,
                 &allowlists,
                 &heredoc_settings,
+                None,
                 Some(&deadline),
             );
 
@@ -2523,5 +2545,155 @@ mod tests {
         );
         assert!(result.is_allowed());
         assert!(result.allowlist_override.is_some());
+    }
+
+    // =========================================================================
+    // Confidence Tiering Tests (git_safety_guard-oien.2.2)
+    // =========================================================================
+    //
+    // These tests verify that Medium/Low severity patterns are evaluated (not skipped)
+    // and the evaluator returns Deny results that the policy layer can convert to Warn/Log.
+
+    #[test]
+    fn medium_severity_patterns_are_evaluated() {
+        // Test that Medium severity patterns are matched and return Deny results.
+        // The policy layer in main.rs will convert these to Warn mode.
+        let mut config = default_config();
+        config.packs.enabled.push("containers.docker".to_string());
+        let compiled = config.overrides.compile();
+        let allowlists = default_allowlists();
+
+        // docker image prune is a Medium severity pattern
+        let result = evaluate_command(
+            "docker image prune",
+            &config,
+            &["docker"],
+            &compiled,
+            &allowlists,
+        );
+
+        // Evaluator should return Deny (policy layer converts to Warn)
+        assert!(
+            result.is_denied(),
+            "Medium severity pattern should be evaluated and return Deny"
+        );
+
+        // Verify severity is Medium
+        let info = result.pattern_info.as_ref().expect("should have pattern info");
+        assert_eq!(
+            info.severity,
+            Some(crate::packs::Severity::Medium),
+            "Pattern should have Medium severity"
+        );
+        assert_eq!(info.pack_id.as_deref(), Some("containers.docker"));
+        assert_eq!(info.pattern_name.as_deref(), Some("image-prune"));
+    }
+
+    #[test]
+    fn medium_severity_git_patterns_are_evaluated() {
+        // Test git branch -D and stash drop (both Medium severity)
+        let config = default_config();
+        let compiled = config.overrides.compile();
+        let allowlists = default_allowlists();
+
+        // git branch -D is Medium severity
+        let branch_result = evaluate_command(
+            "git branch -D feature-branch",
+            &config,
+            &["git"],
+            &compiled,
+            &allowlists,
+        );
+        assert!(
+            branch_result.is_denied(),
+            "git branch -D should be evaluated"
+        );
+        let branch_info = branch_result.pattern_info.as_ref().unwrap();
+        assert_eq!(branch_info.severity, Some(crate::packs::Severity::Medium));
+        assert_eq!(branch_info.pattern_name.as_deref(), Some("branch-force-delete"));
+
+        // git stash drop is Medium severity
+        let stash_result = evaluate_command(
+            "git stash drop stash@{0}",
+            &config,
+            &["git"],
+            &compiled,
+            &allowlists,
+        );
+        assert!(stash_result.is_denied(), "git stash drop should be evaluated");
+        let stash_info = stash_result.pattern_info.as_ref().unwrap();
+        assert_eq!(stash_info.severity, Some(crate::packs::Severity::Medium));
+        assert_eq!(stash_info.pattern_name.as_deref(), Some("stash-drop"));
+    }
+
+    #[test]
+    fn critical_patterns_still_return_critical_severity() {
+        // Ensure Critical patterns are unchanged
+        let config = default_config();
+        let compiled = config.overrides.compile();
+        let allowlists = default_allowlists();
+
+        // git reset --hard is Critical
+        let result = evaluate_command(
+            "git reset --hard",
+            &config,
+            &["git"],
+            &compiled,
+            &allowlists,
+        );
+        assert!(result.is_denied());
+        let info = result.pattern_info.as_ref().unwrap();
+        assert_eq!(
+            info.severity,
+            Some(crate::packs::Severity::Critical),
+            "git reset --hard should remain Critical severity"
+        );
+
+        // git stash clear is Critical (vs stash drop which is Medium)
+        let clear_result = evaluate_command(
+            "git stash clear",
+            &config,
+            &["git"],
+            &compiled,
+            &allowlists,
+        );
+        assert!(clear_result.is_denied());
+        let clear_info = clear_result.pattern_info.as_ref().unwrap();
+        assert_eq!(
+            clear_info.severity,
+            Some(crate::packs::Severity::Critical),
+            "git stash clear should remain Critical severity"
+        );
+    }
+
+    #[test]
+    fn policy_converts_medium_to_warn_mode() {
+        // Test the policy layer correctly converts Medium severity to Warn mode.
+        // This simulates what main.rs does after receiving the evaluation result.
+        let policy = crate::config::PolicyConfig::default();
+
+        // Medium severity should resolve to Warn mode
+        let mode = policy.resolve_mode(
+            Some("containers.docker"),
+            Some("image-prune"),
+            Some(crate::packs::Severity::Medium),
+        );
+        assert_eq!(
+            mode,
+            crate::packs::DecisionMode::Warn,
+            "Medium severity should default to Warn mode"
+        );
+
+        // Critical severity should resolve to Deny mode
+        let critical_mode = policy.resolve_mode(
+            Some("core.git"),
+            Some("reset-hard"),
+            Some(crate::packs::Severity::Critical),
+        );
+        assert_eq!(
+            critical_mode,
+            crate::packs::DecisionMode::Deny,
+            "Critical severity should always be Deny mode"
+        );
     }
 }

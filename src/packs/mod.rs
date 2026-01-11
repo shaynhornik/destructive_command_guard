@@ -2215,19 +2215,39 @@ mod tests {
         }
     }
 
-    /// Verify all core pack rules have explicit blocking behavior.
+    /// Verify core pack severity assignments are correct.
+    ///
+    /// Most core rules should block by default (Critical/High), but some recoverable
+    /// operations are Medium severity (warn by default). This test documents the
+    /// expected severity distribution.
     #[test]
-    fn all_core_rules_block_by_default() {
-        // Core packs should be conservative - all rules should block by default
+    fn core_rules_have_appropriate_severity() {
+        // Patterns that should be Medium (recoverable operations)
+        let medium_patterns = [
+            ("core.git", "branch-force-delete"), // Recoverable via reflog
+            ("core.git", "stash-drop"),          // Recoverable via fsck
+        ];
+
         for pack_id in ["core.git", "core.filesystem"] {
             let pack = REGISTRY.get(pack_id).expect("Pack should exist");
 
             for pattern in &pack.destructive_patterns {
                 let name = pattern.name.unwrap_or("<unnamed>");
-                assert!(
-                    pattern.severity.blocks_by_default(),
-                    "Core pack rule {pack_id}:{name} should block by default"
-                );
+                let is_expected_medium = medium_patterns
+                    .iter()
+                    .any(|(pid, pname)| *pid == pack_id && *pname == name);
+
+                if is_expected_medium {
+                    assert!(
+                        matches!(pattern.severity, Severity::Medium),
+                        "Core pack rule {pack_id}:{name} should be Medium severity (recoverable)"
+                    );
+                } else {
+                    assert!(
+                        pattern.severity.blocks_by_default(),
+                        "Core pack rule {pack_id}:{name} should block by default"
+                    );
+                }
             }
         }
     }

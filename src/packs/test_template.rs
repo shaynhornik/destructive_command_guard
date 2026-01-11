@@ -295,8 +295,16 @@ mod pack_test_template {
         // These should be High severity
         assert_blocks_with_severity(&pack, "git checkout -- file.txt", Severity::High);
         assert_blocks_with_severity(&pack, "git restore file.txt", Severity::High);
-        assert_blocks_with_severity(&pack, "git stash drop", Severity::High);
-        assert_blocks_with_severity(&pack, "git branch -D feature", Severity::High);
+    }
+
+    /// Test: Medium severity patterns (recoverable, warn by default)
+    #[test]
+    fn test_severity_medium_patterns() {
+        let pack = example_pack::create_pack();
+
+        // These were moved to Medium (recoverable via reflog/fsck)
+        assert_blocks_with_severity(&pack, "git stash drop", Severity::Medium);
+        assert_blocks_with_severity(&pack, "git branch -D feature", Severity::Medium);
     }
 
     // =========================================================================

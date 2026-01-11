@@ -69,17 +69,19 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
             r"docker\s+network\s+prune",
             "docker network prune removes ALL unused networks."
         ),
-        // image prune - removes unused images
+        // image prune - removes unused images (Medium: only affects unused images)
         destructive_pattern!(
             "image-prune",
             r"docker\s+image\s+prune",
-            "docker image prune removes unused images. Use 'docker images' to review first."
+            "docker image prune removes unused images. Use 'docker images' to review first.",
+            Medium
         ),
-        // container prune - removes stopped containers
+        // container prune - removes stopped containers (Medium: only affects stopped)
         destructive_pattern!(
             "container-prune",
             r"docker\s+container\s+prune",
-            "docker container prune removes ALL stopped containers."
+            "docker container prune removes ALL stopped containers.",
+            Medium
         ),
         // rm -f (force remove containers)
         destructive_pattern!(
