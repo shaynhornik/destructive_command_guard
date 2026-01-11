@@ -20,6 +20,7 @@
 //! // The 'git commit -m' part is classified as Executed
 //! ```
 
+use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::ops::Range;
 
@@ -127,6 +128,8 @@ impl Span {
     }
 }
 
+type SpanVec = SmallVec<[Span; 32]>;
+
 /// A collection of classified spans for a command.
 ///
 /// This is the main output of the context classifier. It can be used to:
@@ -136,15 +139,17 @@ impl Span {
 #[derive(Debug, Clone, Default)]
 pub struct CommandSpans {
     /// All classified spans, in order of appearance.
-    spans: Vec<Span>,
+    spans: SpanVec,
 }
 
 impl CommandSpans {
     /// Create an empty spans collection.
     #[inline]
     #[must_use]
-    pub const fn new() -> Self {
-        Self { spans: Vec::new() }
+    pub fn new() -> Self {
+        Self {
+            spans: SpanVec::new(),
+        }
     }
 
     /// Add a span to the collection.
@@ -295,7 +300,12 @@ impl ContextClassifier {
                             }
                             span_start = i;
                             stack.push(TokenizerState::SingleQuote);
-                            current_kind = SpanKind::Data;
+                            current_kind = if pending_inline_code {
+                                pending_inline_code = false;
+                                SpanKind::InlineCode
+                            } else {
+                                SpanKind::Data
+                            };
                         }
                         b'"' => {
                             if i > span_start {
@@ -365,7 +375,7 @@ impl ContextClassifier {
                             // Whitespace
                             if i > last_word_start {
                                 let word = &command[last_word_start..i];
-                                if word == "-c" || word == "-e" || word == "-r" || word == "-S" {
+                                if is_inline_code_flag(word) {
                                     pending_inline_code = self.check_inline_code_context(
                                         command,
                                         last_word_start,
@@ -432,7 +442,7 @@ impl ContextClassifier {
                             stack.last(),
                             Some(TokenizerState::CommandSubst | TokenizerState::Backtick)
                         ) {
-                            spans.push(Span::new(SpanKind::Data, span_start, i + 1));
+                            spans.push(Span::new(current_kind, span_start, i + 1));
                             span_start = i + 1;
                             current_kind = SpanKind::Executed;
                         }
@@ -860,7 +870,7 @@ pub fn sanitize_for_pattern_matching(command: &str) -> Cow<'_, str> {
         return Cow::Borrowed(command);
     }
 
-    let mut mask_ranges: Vec<Range<usize>> = Vec::new();
+    let mut mask_ranges: SmallVec<[Range<usize>; 8]> = SmallVec::new();
 
     // Per-segment state (segments split on shell separators like |, ;, &&, ||).
     let mut segment_cmd: Option<&str> = None;
@@ -1439,12 +1449,13 @@ impl SanitizeToken {
     }
 }
 
-#[must_use]
-fn tokenize_command(command: &str) -> Vec<SanitizeToken> {
+type SanitizeTokens = SmallVec<[SanitizeToken; 16]>;
+
+fn tokenize_command(command: &str) -> SanitizeTokens {
     let bytes = command.as_bytes();
     let len = bytes.len();
 
-    let mut tokens = Vec::new();
+    let mut tokens = SanitizeTokens::new();
     let mut i = 0;
 
     while i < len {
@@ -1508,7 +1519,7 @@ fn consume_separator_token(
     bytes: &[u8],
     i: usize,
     len: usize,
-    tokens: &mut Vec<SanitizeToken>,
+    tokens: &mut SanitizeTokens,
 ) -> Option<usize> {
     match bytes[i] {
         b'|' => {
@@ -1746,6 +1757,22 @@ fn env_split_string_context(command: &str, flag_start: usize) -> bool {
     })
 }
 
+#[inline]
+#[must_use]
+fn is_inline_code_flag(word: &str) -> bool {
+    if word == "-S" {
+        return true;
+    }
+    if !word.starts_with('-') || word.starts_with("--") || word.len() < 2 {
+        return false;
+    }
+
+    word.as_bytes()
+        .iter()
+        .skip(1)
+        .any(|b| matches!(b.to_ascii_lowercase(), b'c' | b'e' | b'r'))
+}
+
 #[must_use]
 fn segment_start_before_flag(command: &str, flag_start: usize) -> usize {
     let bytes = command.as_bytes();
@@ -1775,8 +1802,8 @@ fn segment_start_before_flag(command: &str, flag_start: usize) -> usize {
 }
 
 #[must_use]
-fn merge_ranges(ranges: &[Range<usize>]) -> Vec<Range<usize>> {
-    let mut merged: Vec<Range<usize>> = Vec::new();
+fn merge_ranges(ranges: &[Range<usize>]) -> SmallVec<[Range<usize>; 8]> {
+    let mut merged: SmallVec<[Range<usize>; 8]> = SmallVec::new();
     for range in ranges {
         if let Some(last) = merged.last_mut() {
             if range.start <= last.end {
@@ -1913,6 +1940,36 @@ mod tests {
         assert!(
             inline_span.is_some(),
             "Should detect inline code after bash -c"
+        );
+    }
+
+    #[test]
+    fn test_bash_c_single_quote_inline_code() {
+        let cmd = "bash -c 'rm -rf /'";
+        let spans = classify_command(cmd);
+
+        let inline_span = spans
+            .spans()
+            .iter()
+            .find(|s| s.kind == SpanKind::InlineCode);
+        assert!(
+            inline_span.is_some(),
+            "Should detect inline code after bash -c with single quotes"
+        );
+    }
+
+    #[test]
+    fn test_bash_lc_inline_code() {
+        let cmd = "bash -lc \"rm -rf /\"";
+        let spans = classify_command(cmd);
+
+        let inline_span = spans
+            .spans()
+            .iter()
+            .find(|s| s.kind == SpanKind::InlineCode);
+        assert!(
+            inline_span.is_some(),
+            "Should detect inline code after bash -lc"
         );
     }
 
