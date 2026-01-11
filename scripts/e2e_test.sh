@@ -297,7 +297,9 @@ test_command() {
                     # Best-effort rule attribution: our heredoc/inline path encodes `rule <pack>:<pattern>`
                     # inside the reason string.
                     local rule_id=""
-                    rule_id=$(echo "$reason_line" | grep -Eo 'rule [^,)]+' | head -1 | sed 's/^rule //')
+                    rule_id=$(
+                        echo "$reason_line" | grep -Eo 'rule [^,)]+' | head -1 | sed 's/^rule //' || true
+                    )
                     echo -e "  ${CYAN}Reason:${NC} $(echo "$reason_line" | head -c 160)..."
                     if [[ -n "$rule_id" ]]; then
                         echo -e "  ${CYAN}Rule:${NC} $rule_id"

@@ -56,9 +56,12 @@ use std::fmt::Write;
 use std::fs;
 use std::path::Path;
 
+use destructive_command_guard::packs::REGISTRY;
 use destructive_command_guard::packs::test_helpers::{
-    CorpusCategory, CorpusTestCase, load_corpus_dir, verify_corpus_case,
+    CorpusCategory, CorpusTestCase, EvalSnapshot, diff_snapshots, load_corpus_dir,
+    verify_corpus_case,
 };
+use destructive_command_guard::{Config, LayeredAllowlist, evaluate_command_with_pack_order};
 
 /// Load all corpus test cases from the standard directory.
 fn load_all_cases() -> Vec<(CorpusCategory, String, CorpusTestCase)> {
@@ -327,6 +330,149 @@ fn parse_scenario_fixture(path: &Path) -> Result<ScenarioFixture, String> {
 // =============================================================================
 // Tests
 // =============================================================================
+
+#[test]
+fn keyword_index_matches_legacy_might_match_on_regression_corpus() {
+    let config = Config::default();
+    let enabled_packs = config.enabled_pack_ids();
+    let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
+    let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
+    let keyword_index = REGISTRY
+        .build_enabled_keyword_index(&ordered_packs)
+        .expect("keyword index should build for enabled pack set");
+    let compiled_overrides = config.overrides.compile();
+    let allowlists = LayeredAllowlist::default();
+    let heredoc_settings = config.heredoc_settings();
+
+    let all_cases = load_all_cases();
+
+    let mut saw_substring_digit = false;
+    let mut saw_wrapper_prefix = false;
+    let mut saw_quoted_command_word = false;
+    let mut failures = Vec::new();
+
+    for (category, file, case) in &all_cases {
+        let command = case.command.as_str();
+        let with_index = EvalSnapshot::from_result(
+            command,
+            &evaluate_command_with_pack_order(
+                command,
+                &enabled_keywords,
+                &ordered_packs,
+                Some(&keyword_index),
+                &compiled_overrides,
+                &allowlists,
+                &heredoc_settings,
+            ),
+        );
+        let legacy = EvalSnapshot::from_result(
+            command,
+            &evaluate_command_with_pack_order(
+                command,
+                &enabled_keywords,
+                &ordered_packs,
+                None,
+                &compiled_overrides,
+                &allowlists,
+                &heredoc_settings,
+            ),
+        );
+
+        saw_substring_digit |= command.starts_with("digit ");
+        saw_wrapper_prefix |= command.starts_with("sudo ")
+            || command.starts_with("env ")
+            || command.starts_with("command ")
+            || command.starts_with("nohup ")
+            || command.starts_with("time ");
+        saw_quoted_command_word |= command.contains("'git")
+            || command.contains("\"git")
+            || command.contains("'rm")
+            || command.contains("\"rm");
+
+        if with_index != legacy {
+            let diff = diff_snapshots(&legacy, &with_index).unwrap_or_else(|| {
+                "  (snapshots differed but no field-level diff was produced)".to_string()
+            });
+            failures.push(format!(
+                "[{file}] {category:?}: {desc}\n  command: {command}\n\nDiff:\n{diff}",
+                desc = case.description
+            ));
+        }
+    }
+
+    assert!(
+        saw_substring_digit,
+        "regression corpus should include a substring case like 'digit 123'"
+    );
+    assert!(
+        saw_wrapper_prefix,
+        "regression corpus should include wrapper-prefix cases (sudo/env/command/time/nohup)"
+    );
+    assert!(
+        saw_quoted_command_word,
+        "regression corpus should include quoted command-word cases"
+    );
+
+    assert!(
+        failures.is_empty(),
+        "Keyword index diverged from legacy PackEntry::might_match filtering ({} failure(s)):\n\n{}",
+        failures.len(),
+        failures.join("\n\n---\n\n")
+    );
+}
+
+#[test]
+fn keyword_quick_reject_empty_keywords_is_conservative_end_to_end() {
+    let config = Config::default();
+    let enabled_packs = config.enabled_pack_ids();
+    let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
+    let keyword_index = REGISTRY
+        .build_enabled_keyword_index(&ordered_packs)
+        .expect("keyword index should build for enabled pack set");
+    let compiled_overrides = config.overrides.compile();
+    let allowlists = LayeredAllowlist::default();
+    let heredoc_settings = config.heredoc_settings();
+
+    let empty_keywords: [&str; 0] = [];
+    let destructive_commands = ["git reset --hard", "rm -rf src"];
+
+    for command in destructive_commands {
+        let with_index = evaluate_command_with_pack_order(
+            command,
+            &empty_keywords,
+            &ordered_packs,
+            Some(&keyword_index),
+            &compiled_overrides,
+            &allowlists,
+            &heredoc_settings,
+        );
+        let legacy = evaluate_command_with_pack_order(
+            command,
+            &empty_keywords,
+            &ordered_packs,
+            None,
+            &compiled_overrides,
+            &allowlists,
+            &heredoc_settings,
+        );
+
+        assert_eq!(
+            EvalSnapshot::from_result(command, &legacy).decision,
+            "deny",
+            "empty keyword list must not allow skipping pack evaluation"
+        );
+        assert_eq!(
+            EvalSnapshot::from_result(command, &with_index).decision,
+            "deny",
+            "empty keyword list must not allow skipping pack evaluation"
+        );
+        assert_eq!(
+            EvalSnapshot::from_result(command, &legacy),
+            EvalSnapshot::from_result(command, &with_index),
+            "index and legacy filtering must stay equivalent even with empty enabled_keywords"
+        );
+    }
+}
 
 #[test]
 fn corpus_true_positives_isomorphism() {
