@@ -261,9 +261,46 @@ pub struct Pack {
     /// Built by `PackRegistry::register_pack()` from keywords. Set to `None` in pack
     /// constructors; the registry initializes this during registration.
     pub keyword_matcher: Option<aho_corasick::AhoCorasick>,
+
+    /// Pre-built RegexSet for O(n) safe pattern matching.
+    /// Allows checking all safe patterns in a single pass. Built lazily when
+    /// the pack is instantiated. Only includes patterns that can use the
+    /// linear-time regex engine (no lookahead/lookbehind).
+    pub safe_regex_set: Option<regex::RegexSet>,
+
+    /// True if safe_regex_set covers ALL safe patterns (no backtracking patterns exist).
+    /// When true and the RegexSet misses, we can skip individual pattern checks.
+    pub safe_regex_set_is_complete: bool,
 }
 
 impl Pack {
+    /// Create a new pack with the given patterns.
+    ///
+    /// This constructor initializes the lazy fields (`keyword_matcher`, `safe_regex_set`,
+    /// `safe_regex_set_is_complete`) to their default values. These are populated
+    /// during pack registration by `PackEntry::get_pack()`.
+    #[must_use]
+    pub fn new(
+        id: PackId,
+        name: &'static str,
+        description: &'static str,
+        keywords: &'static [&'static str],
+        safe_patterns: Vec<SafePattern>,
+        destructive_patterns: Vec<DestructivePattern>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            description,
+            keywords,
+            safe_patterns,
+            destructive_patterns,
+            keyword_matcher: None,
+            safe_regex_set: None,
+            safe_regex_set_is_complete: false,
+        }
+    }
+
     /// Check if a command contains any of this pack's keywords.
     /// Returns false if the command doesn't contain any keywords (quick reject).
     ///
@@ -289,8 +326,24 @@ impl Pack {
     }
 
     /// Check if a command matches any safe pattern.
+    ///
+    /// Uses RegexSet for O(n) matching when available (fast path).
+    /// Falls back to individual pattern checks for backtracking patterns.
     #[must_use]
     pub fn matches_safe(&self, cmd: &str) -> bool {
+        // Fast path: use RegexSet if available
+        if let Some(ref set) = self.safe_regex_set {
+            if set.is_match(cmd) {
+                return true;
+            }
+            // If RegexSet covers all patterns and missed, no match
+            if self.safe_regex_set_is_complete {
+                return false;
+            }
+        }
+
+        // Fallback: check patterns individually
+        // This handles: no RegexSet, RegexSet compilation failed, or backtracking patterns
         self.safe_patterns.iter().any(|p| p.regex.is_match(cmd))
     }
 
@@ -446,6 +499,24 @@ impl PackEntry {
                     aho_corasick::AhoCorasick::new(pack.keywords)
                         .expect("pack keywords should be valid patterns"),
                 );
+            }
+            // Build RegexSet for safe pattern matching (fast path)
+            if !pack.safe_patterns.is_empty() && pack.safe_regex_set.is_none() {
+                // Collect pattern strings that can use linear-time engine
+                let patterns: Vec<&str> = pack
+                    .safe_patterns
+                    .iter()
+                    .filter(|p| !regex_engine::needs_backtracking_engine(p.regex.as_str()))
+                    .map(|p| p.regex.as_str())
+                    .collect();
+
+                // Track if RegexSet covers all patterns (no backtracking patterns)
+                pack.safe_regex_set_is_complete = patterns.len() == pack.safe_patterns.len();
+
+                // Only build RegexSet if we have linear patterns
+                if !patterns.is_empty() {
+                    pack.safe_regex_set = regex::RegexSet::new(patterns).ok();
+                }
             }
             pack
         })
@@ -1113,7 +1184,7 @@ impl PackRegistry {
             "package_managers" => 8,
             "strict_git" => 9,
             "cicd" | "email" | "featureflags" | "secrets" | "monitoring" | "payment" => 10, // CI/CD + email + feature flags + secrets + monitoring + payment tooling
-            _ => 11,                                             // Unknown categories go last
+            _ => 11, // Unknown categories go last
         }
     }
 
@@ -1614,12 +1685,15 @@ mod tests {
         // Infrastructure should be tier 3
         assert_eq!(PackRegistry::pack_tier("infrastructure.terraform"), 3);
 
-        // Cloud/API Gateway should be tier 4
+        // Tier 4 packs should be tier 4
         assert_eq!(PackRegistry::pack_tier("cloud.aws"), 4);
         assert_eq!(PackRegistry::pack_tier("apigateway.aws"), 4);
         assert_eq!(PackRegistry::pack_tier("dns.cloudflare"), 4);
         assert_eq!(PackRegistry::pack_tier("dns.route53"), 4);
         assert_eq!(PackRegistry::pack_tier("dns.generic"), 4);
+        assert_eq!(PackRegistry::pack_tier("platform.github"), 4);
+        assert_eq!(PackRegistry::pack_tier("cdn.cloudflare_workers"), 4);
+        assert_eq!(PackRegistry::pack_tier("loadbalancer.nginx"), 4);
 
         // Kubernetes should be tier 5
         assert_eq!(PackRegistry::pack_tier("kubernetes.kubectl"), 5);
@@ -1642,13 +1716,16 @@ mod tests {
         // Strict git should be tier 9
         assert_eq!(PackRegistry::pack_tier("strict_git"), 9);
 
-        // CI/CD should be tier 10
+        // Tier 10 service packs should be tier 10
         assert_eq!(PackRegistry::pack_tier("cicd.github_actions"), 10);
         assert_eq!(PackRegistry::pack_tier("cicd.gitlab_ci"), 10);
         assert_eq!(PackRegistry::pack_tier("cicd.jenkins"), 10);
         assert_eq!(PackRegistry::pack_tier("cicd.circleci"), 10);
+        assert_eq!(PackRegistry::pack_tier("email.ses"), 10);
+        assert_eq!(PackRegistry::pack_tier("featureflags.launchdarkly"), 10);
         assert_eq!(PackRegistry::pack_tier("secrets.vault"), 10);
         assert_eq!(PackRegistry::pack_tier("monitoring.splunk"), 10);
+        assert_eq!(PackRegistry::pack_tier("payment.stripe"), 10);
 
         // Unknown should be tier 11
         assert_eq!(PackRegistry::pack_tier("unknown.pack"), 11);
