@@ -148,11 +148,20 @@ pub fn configure_colors() {
     }
 }
 
+/// Format the explain hint line for copy-paste convenience.
+fn format_explain_hint(command: &str) -> String {
+    // Escape double quotes in command for safe copy-paste
+    let escaped = command.replace('"', "\\\"");
+    format!("Tip: dcg explain \"{escaped}\"")
+}
+
 /// Format the denial message for the JSON output (plain text).
 #[must_use]
 pub fn format_denial_message(command: &str, reason: &str) -> String {
+    let explain_hint = format_explain_hint(command);
     format!(
         "BLOCKED by dcg\n\n\
+         {explain_hint}\n\n\
          Reason: {reason}\n\n\
          Command: {command}\n\n\
          If this operation is truly needed, ask the user for explicit \
@@ -182,6 +191,9 @@ pub fn print_colorful_warning(
     if let Some(code) = allow_once_code {
         let _ = writeln!(handle, "{}", allow_once_header_line(code));
     }
+
+    // Explain hint line (always shown, after allow-once if present)
+    let _ = writeln!(handle, "{}", format_explain_hint(command).bright_black());
     let _ = writeln!(handle);
 
     // Top border with corners
@@ -776,5 +788,67 @@ mod tests {
             long_emoji.chars().count()
         );
         print_colorful_warning(long_emoji, "test reason", Some("emoji.pack"), None, None);
+    }
+
+    // =============================================================================
+    // Explain hint tests (git_safety_guard-oien.2.3)
+    // =============================================================================
+
+    #[test]
+    fn test_format_explain_hint_simple() {
+        let hint = format_explain_hint("git reset --hard");
+        assert_eq!(hint, r#"Tip: dcg explain "git reset --hard""#);
+    }
+
+    #[test]
+    fn test_format_explain_hint_escapes_double_quotes() {
+        // Commands with double quotes should be escaped for copy-paste safety
+        let hint = format_explain_hint(r#"echo "hello world""#);
+        assert_eq!(hint, r#"Tip: dcg explain "echo \"hello world\"""#);
+    }
+
+    #[test]
+    fn test_format_explain_hint_with_special_chars() {
+        // Test various shell metacharacters are preserved (only " is escaped)
+        let hint = format_explain_hint("rm -rf $HOME/* && echo 'done'");
+        assert_eq!(hint, r#"Tip: dcg explain "rm -rf $HOME/* && echo 'done'""#);
+    }
+
+    #[test]
+    fn test_format_denial_message_contains_explain_hint() {
+        // The JSON denial message should include the explain hint
+        let msg = format_denial_message("git reset --hard", "destroys uncommitted changes");
+        assert!(
+            msg.contains(r#"Tip: dcg explain "git reset --hard""#),
+            "Denial message should contain explain hint, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_format_denial_message_explain_hint_position() {
+        // Verify the explain hint comes after "BLOCKED" but before "Reason:"
+        let msg = format_denial_message("rm -rf /", "dangerous filesystem operation");
+        let blocked_pos = msg.find("BLOCKED").expect("should contain BLOCKED");
+        let tip_pos = msg.find("Tip: dcg explain").expect("should contain explain hint");
+        let reason_pos = msg.find("Reason:").expect("should contain Reason:");
+
+        assert!(
+            blocked_pos < tip_pos,
+            "BLOCKED should come before explain hint"
+        );
+        assert!(
+            tip_pos < reason_pos,
+            "Explain hint should come before Reason:"
+        );
+    }
+
+    #[test]
+    fn test_colorful_warning_with_explain_hint_does_not_panic() {
+        // Verify print_colorful_warning handles various inputs without panic
+        // (the hint is printed to stderr which we can't easily capture in unit tests,
+        // but we can verify it doesn't crash)
+        print_colorful_warning("git push --force", "force push", Some("git"), Some("force_push"), None);
+        print_colorful_warning("rm -rf /", "filesystem", Some("fs"), None, Some("abcd"));
+        print_colorful_warning(r#"echo "quoted""#, "echo", None, None, None);
     }
 }
