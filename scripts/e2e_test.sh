@@ -21,6 +21,11 @@
 
 set -euo pipefail
 
+# Hermetic behavior: avoid inheriting CI markers from the parent environment.
+# Some allowlist tests intentionally assert behavior when `CI` is *unset* unless
+# explicitly provided via per-test env overrides.
+unset CI
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'

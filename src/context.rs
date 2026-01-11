@@ -763,6 +763,8 @@ pub static SAFE_STRING_REGISTRY: SafeStringRegistry = SafeStringRegistry {
     flag_data_pairs: &[
         // Git message flags - commit/tag messages are documentation
         SafeFlagEntry::both("git", "-m", "--message"),
+        // Git log search - pattern is data (not executed)
+        SafeFlagEntry::long("git", "--grep"),
         // Note: git commit -m is actually 'git' command with 'commit' subcommand + -m flag
         // We handle this at the command level since -m is always data for git
 
@@ -774,10 +776,28 @@ pub static SAFE_STRING_REGISTRY: SafeStringRegistry = SafeStringRegistry {
         // Search tools - patterns are data, not executed (only pattern-supplying flags)
         SafeFlagEntry::both("grep", "-e", "--regexp"),
         SafeFlagEntry::both("rg", "-e", "--regexp"),
+        SafeFlagEntry::both("ag", "-e", "--pattern"), // Silver Searcher
+        SafeFlagEntry::both("ack", "-e", "--pattern"), // ack search tool
         // GitHub CLI - titles and bodies are documentation
         SafeFlagEntry::both("gh", "-t", "--title"),
         SafeFlagEntry::both("gh", "-b", "--body"),
         SafeFlagEntry::both("gh", "-m", "--message"),
+        // curl - request data and headers are not executed
+        SafeFlagEntry::both("curl", "-d", "--data"),
+        SafeFlagEntry::both("curl", "-H", "--header"),
+        SafeFlagEntry::long("curl", "--data-raw"),
+        SafeFlagEntry::long("curl", "--data-binary"),
+        // jq - variable values are data, not code
+        SafeFlagEntry::long("jq", "--arg"),
+        SafeFlagEntry::long("jq", "--argjson"),
+        SafeFlagEntry::long("jq", "--slurpfile"),
+        // Docker - labels are metadata, not code
+        SafeFlagEntry::both("docker", "-l", "--label"),
+        // kubectl - annotations and labels are metadata
+        SafeFlagEntry::long("kubectl", "--annotation"),
+        SafeFlagEntry::both("kubectl", "-l", "--label"),
+        // xargs - placeholder string is literal
+        SafeFlagEntry::short("xargs", "-I"),
         // Cargo/npm - package descriptions
         SafeFlagEntry::long("cargo", "--message"),
         SafeFlagEntry::long("npm", "--message"),
@@ -2717,5 +2737,139 @@ mod tests {
             code_span_simple.is_some(),
             "Quoted interpreter name must still detect -c as InlineCode"
         );
+    }
+
+    // =========================================================================
+    // Safe String Registry Tests - New Entries (oien.2.1)
+    // =========================================================================
+
+    #[test]
+    fn test_registry_git_grep_flag() {
+        // git --grep takes a pattern for searching commit messages (data, not code)
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("git", "--grep"));
+        // Short version doesn't exist for --grep
+        assert!(!SAFE_STRING_REGISTRY.is_flag_data("git", "-g"));
+    }
+
+    #[test]
+    fn test_registry_ag_pattern_flags() {
+        // ag (Silver Searcher) -e/--pattern take search patterns
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("ag", "-e"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("ag", "--pattern"));
+    }
+
+    #[test]
+    fn test_registry_ack_pattern_flags() {
+        // ack -e/--pattern take search patterns
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("ack", "-e"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("ack", "--pattern"));
+    }
+
+    #[test]
+    fn test_registry_curl_data_flags() {
+        // curl -d/--data, -H/--header, --data-raw, --data-binary are data
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("curl", "-d"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("curl", "--data"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("curl", "-H"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("curl", "--header"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("curl", "--data-raw"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("curl", "--data-binary"));
+        // But --url is NOT data (it could be code injection target)
+        assert!(!SAFE_STRING_REGISTRY.is_flag_data("curl", "--url"));
+    }
+
+    #[test]
+    fn test_registry_jq_variable_flags() {
+        // jq --arg, --argjson, --slurpfile pass data values
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("jq", "--arg"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("jq", "--argjson"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("jq", "--slurpfile"));
+        // But -f/--from-file takes a file path that gets executed
+        assert!(!SAFE_STRING_REGISTRY.is_flag_data("jq", "-f"));
+    }
+
+    #[test]
+    fn test_registry_docker_label_flags() {
+        // docker -l/--label sets metadata
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("docker", "-l"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("docker", "--label"));
+        // But --entrypoint is NOT data (it's code)
+        assert!(!SAFE_STRING_REGISTRY.is_flag_data("docker", "--entrypoint"));
+    }
+
+    #[test]
+    fn test_registry_kubectl_annotation_label_flags() {
+        // kubectl --annotation, -l/--label set metadata
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("kubectl", "--annotation"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("kubectl", "-l"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("kubectl", "--label"));
+        // But --command is NOT data (it's code)
+        assert!(!SAFE_STRING_REGISTRY.is_flag_data("kubectl", "--command"));
+    }
+
+    #[test]
+    fn test_registry_xargs_placeholder_flag() {
+        // xargs -I sets a placeholder string
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("xargs", "-I"));
+        // Counterexample: xargs itself can execute commands
+        assert!(!SAFE_STRING_REGISTRY.is_all_args_data("xargs"));
+    }
+
+    #[test]
+    fn test_registry_cargo_npm_message_flags() {
+        // cargo/npm --message for version messages
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("cargo", "--message"));
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("npm", "--message"));
+    }
+
+    #[test]
+    fn test_false_positive_curl_data() {
+        // curl -d with destructive-looking data should NOT trigger
+        let cmd = r#"curl -d "rm -rf /" https://api.example.com"#;
+
+        // Using the registry, we know -d flag args are data
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("curl", "-d"));
+
+        // The data should be classified as Argument
+        let spans = classify_command(cmd);
+        let data_span = spans
+            .spans()
+            .iter()
+            .find(|s| s.text(cmd).contains("rm -rf"));
+        assert!(data_span.is_some());
+        assert_eq!(data_span.unwrap().kind, SpanKind::Argument);
+    }
+
+    #[test]
+    fn test_false_positive_ag_pattern() {
+        // ag -e with destructive-looking pattern should NOT trigger
+        let cmd = r#"ag -e "rm -rf" src/"#;
+
+        // Using the registry
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("ag", "-e"));
+
+        // The pattern should be classified as Argument
+        let spans = classify_command(cmd);
+        let pattern_span = spans.spans().iter().find(|s| s.text(cmd) == "\"rm -rf\"");
+        assert!(pattern_span.is_some());
+        assert_eq!(pattern_span.unwrap().kind, SpanKind::Argument);
+    }
+
+    #[test]
+    fn test_false_positive_docker_label() {
+        // docker --label with destructive-looking label should NOT trigger
+        let cmd = r#"docker run --label "cleanup=rm -rf /tmp" nginx"#;
+
+        // Using the registry
+        assert!(SAFE_STRING_REGISTRY.is_flag_data("docker", "--label"));
+
+        // The label should be classified as Argument
+        let spans = classify_command(cmd);
+        let label_span = spans
+            .spans()
+            .iter()
+            .find(|s| s.text(cmd).contains("rm -rf"));
+        assert!(label_span.is_some());
+        assert_eq!(label_span.unwrap().kind, SpanKind::Argument);
     }
 }
