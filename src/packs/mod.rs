@@ -22,6 +22,7 @@ pub mod core;
 pub mod database;
 pub mod dns;
 pub mod email;
+pub mod featureflags;
 pub mod infrastructure;
 pub mod kubernetes;
 pub mod loadbalancer;
@@ -534,7 +535,7 @@ impl EnabledKeywordIndex {
 
 /// Static pack entries - metadata is available without instantiating packs.
 /// Packs are built lazily on first access.
-static PACK_ENTRIES: [PackEntry; 75] = [
+static PACK_ENTRIES: [PackEntry; 78] = [
     PackEntry::new("core.git", &["git"], core::git::create_pack),
     PackEntry::new(
         "core.filesystem",
@@ -623,6 +624,26 @@ static PACK_ENTRIES: [PackEntry; 75] = [
         "email.sendgrid",
         &["sendgrid", "api.sendgrid.com"],
         email::sendgrid::create_pack,
+    ),
+    PackEntry::new(
+        "featureflags.flipt",
+        &["flipt"],
+        featureflags::flipt::create_pack,
+    ),
+    PackEntry::new(
+        "featureflags.launchdarkly",
+        &["ldcli", "launchdarkly"],
+        featureflags::launchdarkly::create_pack,
+    ),
+    PackEntry::new(
+        "featureflags.split",
+        &["split", "api.split.io"],
+        featureflags::split::create_pack,
+    ),
+    PackEntry::new(
+        "featureflags.unleash",
+        &["unleash"],
+        featureflags::unleash::create_pack,
     ),
     PackEntry::new(
         "loadbalancer.haproxy",
@@ -872,6 +893,11 @@ static PACK_ENTRIES: [PackEntry; 75] = [
         "apigateway.kong",
         &["kong", "deck", "8001"],
         apigateway::kong::create_pack,
+    ),
+    PackEntry::new(
+        "apigateway.apigee",
+        &["apigee", "apigeecli"],
+        apigateway::apigee::create_pack,
     ),
     PackEntry::new(
         "infrastructure.terraform",
@@ -2016,7 +2042,12 @@ mod tests {
                 .destructive_patterns
                 .iter()
                 .find(|p| p.name == Some(rule_name))
-                .unwrap_or_else(|| panic!("Rule {rule_name} should exist in core.git"));
+                ;
+            assert!(
+                pattern.is_some(),
+                "Rule {rule_name} should exist in core.git"
+            );
+            let pattern = pattern.unwrap();
 
             assert_eq!(
                 pattern.severity,
@@ -2068,7 +2099,12 @@ mod tests {
                 .destructive_patterns
                 .iter()
                 .find(|p| p.name == Some(rule_name))
-                .unwrap_or_else(|| panic!("Rule {rule_name} should exist in core.git"));
+                ;
+            assert!(
+                pattern.is_some(),
+                "Rule {rule_name} should exist in core.git"
+            );
+            let pattern = pattern.unwrap();
 
             assert!(
                 pattern.severity.blocks_by_default(),
