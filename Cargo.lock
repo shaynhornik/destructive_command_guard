@@ -610,6 +610,7 @@ dependencies = [
  "predicates",
  "proptest",
  "regex",
+ "regex-automata",
  "serde",
  "serde_json",
  "sha2",
