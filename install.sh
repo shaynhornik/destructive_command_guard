@@ -94,6 +94,52 @@ run_with_spinner() {
   fi
 }
 
+# Draw a box around text with automatic width calculation
+# Usage: draw_box "color_code" "line1" "line2" ...
+# color_code: ANSI color (e.g., "1;33" for yellow bold, "0;32" for green)
+draw_box() {
+  local color="$1"
+  shift
+  local lines=("$@")
+  local max_width=0
+
+  # Calculate max width (strip ANSI codes for accurate measurement)
+  for line in "${lines[@]}"; do
+    local stripped
+    stripped=$(echo -e "$line" | sed 's/\x1b\[[0-9;]*m//g')
+    local len=${#stripped}
+    if [ "$len" -gt "$max_width" ]; then
+      max_width=$len
+    fi
+  done
+
+  # Add padding
+  local inner_width=$((max_width + 4))
+  local border=""
+  for ((i=0; i<inner_width; i++)); do
+    border+="═"
+  done
+
+  # Draw top border
+  echo -e "\033[${color}m╔${border}╗\033[0m"
+
+  # Draw each line with padding
+  for line in "${lines[@]}"; do
+    local stripped
+    stripped=$(echo -e "$line" | sed 's/\x1b\[[0-9;]*m//g')
+    local len=${#stripped}
+    local padding=$((max_width - len))
+    local pad_str=""
+    for ((i=0; i<padding; i++)); do
+      pad_str+=" "
+    done
+    echo -e "\033[${color}m║\033[0m  ${line}${pad_str}  \033[${color}m║\033[0m"
+  done
+
+  # Draw bottom border
+  echo -e "\033[${color}m╚${border}╝\033[0m"
+}
+
 resolve_version() {
   if [ -n "$VERSION" ]; then return 0; fi
 
@@ -382,30 +428,29 @@ show_upgrade_banner() {
       --border-foreground 214 \
       --padding "1 2" \
       --margin "0 0 1 0" \
-      "$(gum style --foreground 214 --bold '⬆️  UPGRADE DETECTED')" \
+      "$(gum style --foreground 214 --bold 'UPGRADE DETECTED')" \
       "" \
       "$(gum style --foreground 252 "Found predecessor: $PREDECESSOR_SCRIPT")" \
       "$(gum style --foreground 245 'dcg is the modern, high-performance replacement')" \
       "" \
-      "$(gum style --foreground 42 '✓ 300+ detection patterns (vs ~10 in predecessor)')" \
-      "$(gum style --foreground 42 '✓ Sub-millisecond evaluation (vs Python startup)')" \
-      "$(gum style --foreground 42 '✓ Heredoc & multi-line command detection')" \
-      "$(gum style --foreground 42 '✓ Modular pack system with severity levels')" \
-      "$(gum style --foreground 42 '✓ Allow-once escape hatch for false positives')"
+      "$(gum style --foreground 42 '+ 300+ detection patterns (vs ~10 in predecessor)')" \
+      "$(gum style --foreground 42 '+ Sub-millisecond evaluation (vs Python startup)')" \
+      "$(gum style --foreground 42 '+ Heredoc & multi-line command detection')" \
+      "$(gum style --foreground 42 '+ Modular pack system with severity levels')" \
+      "$(gum style --foreground 42 '+ Allow-once escape hatch for false positives')"
   else
     echo ""
-    echo -e "\033[1;33m╔════════════════════════════════════════════════════════════════╗\033[0m"
-    echo -e "\033[1;33m║\033[0m  \033[1;33mUPGRADE DETECTED\033[0m                                              \033[1;33m║\033[0m"
-    echo -e "\033[1;33m╠════════════════════════════════════════════════════════════════╣\033[0m"
-    echo -e "\033[1;33m║\033[0m  Found predecessor: \033[0;36mgit_safety_guard.py\033[0m                        \033[1;33m║\033[0m"
-    echo -e "\033[1;33m║\033[0m  dcg is the modern, high-performance replacement              \033[1;33m║\033[0m"
-    echo -e "\033[1;33m║\033[0m                                                                \033[1;33m║\033[0m"
-    echo -e "\033[1;33m║\033[0m  \033[0;32m+\033[0m 300+ detection patterns (vs ~10 in predecessor)           \033[1;33m║\033[0m"
-    echo -e "\033[1;33m║\033[0m  \033[0;32m+\033[0m Sub-millisecond evaluation (vs Python startup)            \033[1;33m║\033[0m"
-    echo -e "\033[1;33m║\033[0m  \033[0;32m+\033[0m Heredoc & multi-line command detection                    \033[1;33m║\033[0m"
-    echo -e "\033[1;33m║\033[0m  \033[0;32m+\033[0m Modular pack system with severity levels                  \033[1;33m║\033[0m"
-    echo -e "\033[1;33m║\033[0m  \033[0;32m+\033[0m Allow-once escape hatch for false positives               \033[1;33m║\033[0m"
-    echo -e "\033[1;33m╚════════════════════════════════════════════════════════════════╝\033[0m"
+    draw_box "1;33" \
+      "\033[1;33mUPGRADE DETECTED\033[0m" \
+      "" \
+      "Found predecessor: \033[0;36m$PREDECESSOR_SCRIPT\033[0m" \
+      "dcg is the modern, high-performance replacement" \
+      "" \
+      "\033[0;32m+\033[0m 300+ detection patterns (vs ~10 in predecessor)" \
+      "\033[0;32m+\033[0m Sub-millisecond evaluation (vs Python startup)" \
+      "\033[0;32m+\033[0m Heredoc & multi-line command detection" \
+      "\033[0;32m+\033[0m Modular pack system with severity levels" \
+      "\033[0;32m+\033[0m Allow-once escape hatch for false positives"
     echo ""
   fi
 }
