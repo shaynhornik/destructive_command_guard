@@ -512,30 +512,283 @@ jobs:
         run: cargo build --release
 
       - name: Run E2E tests
+        id: e2e
         run: |
+          set +e
+          set -o pipefail
+
           mkdir -p e2e-artifacts
-          ./scripts/e2e_test.sh --verbose --binary target/release/dcg --json --artifacts e2e-artifacts 2>&1 | tee e2e_output.json
+          ./scripts/e2e_test.sh --verbose --binary target/release/dcg --json --artifacts e2e-artifacts | tee e2e_output.json >/dev/null
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+
           echo "## E2E Test Results" >> $GITHUB_STEP_SUMMARY
           # Extract summary from JSON output
           if jq -e '.summary' e2e_output.json >/dev/null 2>&1; then
             echo '```json' >> $GITHUB_STEP_SUMMARY
             jq '.summary' e2e_output.json >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
+
+            FAILED=$(jq -r '.summary.failed // 0' e2e_output.json 2>/dev/null || echo "0")
+            if [ "$FAILED" != "0" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "### First Failure" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              jq -r '.tests[] | select(.result == "fail") | "\(.id): \(.name)\n\n\(.output // "")"' e2e_output.json | head -n 40 >> $GITHUB_STEP_SUMMARY || true
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            fi
           else
             echo '```' >> $GITHUB_STEP_SUMMARY
             tail -20 e2e_output.json >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
           fi
+          exit 0
 
       - name: Upload E2E artifacts
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-failure-artifacts
+          name: e2e-artifacts
           path: |
             e2e_output.json
             e2e-artifacts/
           retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Check E2E result
+        if: steps.e2e.outputs.exit_code != '0'
+        run: |
+          echo "::error::E2E suite failed (exit code ${{ steps.e2e.outputs.exit_code }}). See the 'e2e-artifacts' artifact and the step summary for the first failure."
+          exit 1
+
+  # Scan-mode regression fixtures (ensures scan output stays stable)
+  scan-regression:
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-scan-regression-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Run scan regression fixtures
+        id: scan_regression
+        run: |
+          set +e
+          set -o pipefail
+
+          ./scripts/scan_regression.sh 2>&1 | tee scan_regression.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+
+          if [ -f /tmp/dcg_scan_regression_actual.json ]; then
+            cp /tmp/dcg_scan_regression_actual.json scan_regression_actual.json
+          fi
+
+          echo "## Scan Regression (fixtures)" >> $GITHUB_STEP_SUMMARY
+          if [ -f scan_regression_actual.json ] && jq -e '.summary' scan_regression_actual.json >/dev/null 2>&1; then
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            jq '.summary' scan_regression_actual.json >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            tail -40 scan_regression.log >> $GITHUB_STEP_SUMMARY || true
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+          exit 0
+
+      - name: Upload scan regression artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-regression-artifacts
+          path: |
+            scan_regression.log
+            scan_regression_actual.json
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Check scan regression result
+        if: steps.scan_regression.outputs.exit_code != '0'
+        run: |
+          echo "::error::Scan regression mismatch (exit code ${{ steps.scan_regression.outputs.exit_code }}). See the 'scan-regression-artifacts' artifact and the step summary for details."
+          exit 1
+
+  # Process-per-invocation perf regression gate (compares against committed baseline JSON)
+  perf-regression:
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-perf-regression-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Run perf baseline + compare to repo baseline
+        id: perf
+        run: |
+          set +e
+
+          BASELINE_JSON="perf/baselines/2026-01-11-after-lazy.json"
+          CURRENT_JSON="perf-current.json"
+          REPORT_MD="perf-regression-report.md"
+
+          python3 scripts/perf_baseline.py \
+            --bin target/release/dcg \
+            --output "$CURRENT_JSON" \
+            --warmup 10 \
+            --runs 80 \
+            --skip-trace
+          GEN_EXIT=$?
+          if [ "$GEN_EXIT" -ne 0 ]; then
+            echo "exit_code=$GEN_EXIT" >> $GITHUB_OUTPUT
+            echo "::error::perf baseline generation failed (exit code $GEN_EXIT)"
+            exit 0
+          fi
+
+          python3 - "$BASELINE_JSON" "$CURRENT_JSON" "$REPORT_MD" <<'PY'
+          import json
+          import sys
+
+          baseline_path = sys.argv[1]
+          current_path = sys.argv[2]
+          report_path = sys.argv[3]
+
+          mult = 2.5
+          slack_ms = 5.0
+          rss_slack_kb = 8192
+
+          with open(baseline_path, "r", encoding="utf-8") as handle:
+              baseline = json.load(handle)
+          with open(current_path, "r", encoding="utf-8") as handle:
+              current = json.load(handle)
+
+          baseline_cases = {c["id"]: c for c in baseline.get("cases", [])}
+          current_cases = {c["id"]: c for c in current.get("cases", [])}
+
+          violations = []
+          rows = []
+
+          for case_id in sorted(baseline_cases.keys()):
+              if case_id not in current_cases:
+                  violations.append(f"missing case in current run: {case_id}")
+                  continue
+
+              b = baseline_cases[case_id].get("metrics", {})
+              c = current_cases[case_id].get("metrics", {})
+
+              b_p50 = float(b.get("p50_ms", 0.0))
+              c_p50 = float(c.get("p50_ms", 0.0))
+
+              limit_p50 = b_p50 * mult + slack_ms
+              status = "OK" if c_p50 <= limit_p50 else "REGRESSED"
+              rows.append((case_id, b_p50, c_p50, limit_p50, status))
+
+              if c_p50 > limit_p50:
+                  violations.append(
+                      f"{case_id} p50_ms {c_p50:.2f} > {limit_p50:.2f} (baseline {b_p50:.2f}, mult {mult}x + {slack_ms}ms)"
+                  )
+
+              b_rss = b.get("max_rss_kb")
+              c_rss = c.get("max_rss_kb")
+              if isinstance(b_rss, int) and isinstance(c_rss, int):
+                  rss_limit = max(int(b_rss * 2.0), b_rss + rss_slack_kb)
+                  if c_rss > rss_limit:
+                      violations.append(
+                          f"{case_id} max_rss_kb {c_rss} > {rss_limit} (baseline {b_rss})"
+                      )
+
+          # Also fail if new unexpected cases are added (keeps the harness stable)
+          extra_cases = sorted(set(current_cases.keys()) - set(baseline_cases.keys()))
+          if extra_cases:
+              violations.append(f"unexpected new cases in current run: {', '.join(extra_cases)}")
+
+          # Write report (Markdown for GHA summary + artifacts)
+          lines = []
+          lines.append("## Perf Regression Gate")
+          lines.append("")
+          lines.append(f"- Baseline: `{baseline_path}`")
+          lines.append(f"- Threshold: `current_p50_ms <= baseline_p50_ms * {mult} + {slack_ms}ms`")
+          lines.append(f"- RSS slack: `max(baseline*2, baseline+{rss_slack_kb}KB)` (when available)")
+          lines.append("")
+          lines.append("| Case | Baseline p50 (ms) | Current p50 (ms) | Limit (ms) | Status |")
+          lines.append("|------|-------------------|-----------------|-----------|--------|")
+          for case_id, b_p50, c_p50, limit_p50, status in rows:
+              lines.append(f"| `{case_id}` | {b_p50:.2f} | {c_p50:.2f} | {limit_p50:.2f} | {status} |")
+          lines.append("")
+
+          if violations:
+              lines.append("### Violations")
+              lines.append("")
+              for v in violations[:10]:
+                  lines.append(f"- {v}")
+              if len(violations) > 10:
+                  lines.append(f"- ... and {len(violations) - 10} more")
+              lines.append("")
+
+          with open(report_path, "w", encoding="utf-8") as handle:
+              handle.write("\n".join(lines))
+              handle.write("\n")
+
+          if violations:
+              for v in violations[:5]:
+                  print(f"::error::{v}")
+              sys.exit(1)
+          sys.exit(0)
+          PY
+
+          CHECK_EXIT=$?
+          echo "exit_code=$CHECK_EXIT" >> $GITHUB_OUTPUT
+
+          echo "## Perf Regression" >> $GITHUB_STEP_SUMMARY
+          cat "$REPORT_MD" >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
+
+          exit 0
+
+      - name: Upload perf regression artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-regression-artifacts
+          path: |
+            perf-current.json
+            perf-regression-report.md
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Check perf regression result
+        if: steps.perf.outputs.exit_code != '0'
+        run: |
+          echo "::error::Perf regression gate failed (exit code ${{ steps.perf.outputs.exit_code }}). See 'perf-regression-artifacts' and the step summary."
+          exit 1
 
   # Deep suite: fuzzing (scheduled or manual only)
   fuzz:
