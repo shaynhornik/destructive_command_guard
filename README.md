@@ -130,123 +130,140 @@ This hook intercepts dangerous commands *before* execution and blocks them with 
 
 ## Modular Pack System
 
-dcg uses a modular "pack" system to organize destructive command patterns by category. Packs can be enabled or disabled in the configuration file. Available packs include:
+dcg uses a modular "pack" system to organize destructive command patterns by category. Packs can be enabled or disabled in the configuration file.
 
-### Core Packs (Always Enabled)
-- **core.git** - Blocks destructive git commands (reset --hard, checkout --, push --force, etc.)
-- **core.filesystem** - Blocks dangerous rm -rf outside temp directories
+- Full pack ID index: `docs/packs/README.md`
+- Canonical descriptions + pattern counts: `dcg packs --verbose`
 
-### Database Packs
-- **database.postgresql** - Blocks DROP/TRUNCATE in PostgreSQL
-- **database.mysql** - Blocks DROP/TRUNCATE in MySQL/MariaDB
-- **database.mongodb** - Blocks dropDatabase, drop() in MongoDB
-- **database.redis** - Blocks FLUSHALL/FLUSHDB commands
-- **database.sqlite** - Blocks DROP in SQLite
-
-### Container Packs
-- **containers.docker** - Blocks docker system prune, docker rm -f, etc.
-- **containers.compose** - Blocks docker-compose down --volumes
-- **containers.podman** - Blocks podman system prune, etc.
-
-### Kubernetes Packs
-- **kubernetes.kubectl** - Blocks kubectl delete namespace, etc.
-- **kubernetes.helm** - Blocks helm uninstall, etc.
-- **kubernetes.kustomize** - Blocks kustomize delete patterns
-
-### Cloud Provider Packs
-
-Cloud resources are often expensive, time-consuming to rebuild, and may contain irreplaceable data. These packs provide broad protection across major cloud providers, with particular attention to container registries (which store deployment-critical images) and logging infrastructure (which captures audit trails and debugging data).
-
-- **cloud.aws** - Blocks destructive AWS CLI commands including EC2 instance termination, RDS deletion, S3 recursive removal, EKS cluster deletion, and **container registry operations** (ECR `delete-repository`, `batch-delete-image`, `delete-lifecycle-policy`) and **CloudWatch Logs** (`delete-log-group`, `delete-log-stream`)
-- **cloud.gcp** - Blocks destructive gcloud commands including Compute Engine deletion, Cloud SQL instance deletion, GCS recursive removal, GKE cluster deletion, Firestore deletion, and **Artifact Registry / Container Registry** (`container images delete`, `artifacts docker images delete`, `artifacts repositories delete`)
-- **cloud.azure** - Blocks destructive az commands including VM deletion, storage account deletion, resource group deletion, AKS cluster deletion, and **Azure Container Registry** (`acr delete`, `acr repository delete`, `acr repository untag`)
-
-### Infrastructure Packs
-- **infrastructure.terraform** - Blocks terraform destroy
-- **infrastructure.ansible** - Blocks dangerous ansible patterns
-- **infrastructure.pulumi** - Blocks pulumi destroy
-
-### System Packs
-- **system.disk** - Blocks dd, mkfs, fdisk operations
-- **system.permissions** - Blocks dangerous chmod/chown patterns
-- **system.services** - Blocks systemctl stop/disable patterns
-
-### CI/CD Packs
-- **cicd.github_actions** - Blocks destructive GitHub Actions operations via `gh` CLI (secret/variable deletion, workflow disable, `gh api DELETE /actions/*`)
-- **cicd.gitlab_ci** - Blocks destructive GitLab CI/CD operations via `glab` CLI (pipeline deletion, variable deletion, release deletion, project deletion)
-- **cicd.jenkins** - Blocks destructive Jenkins CLI and API operations (delete-job, delete-node, delete-credentials, wipe-out-workspace, clear-queue, Groovy `doDelete` calls)
-
-### Secrets Management Packs
-
-Secrets are among the most sensitive resources in any infrastructure. Accidental deletion or modification of secrets can cause authentication failures across entire systems, break deployments, and potentially expose sensitive data during recovery. These packs protect secrets management systems with a defense-in-depth approach: safe read operations are explicitly allowlisted, while mutations and deletions require deliberate manual execution.
-
-- **secrets.vault** - Blocks destructive HashiCorp Vault operations (delete, destroy, metadata delete)
-- **secrets.aws_secrets** - Blocks destructive AWS Secrets Manager and SSM Parameter Store operations. AWS secrets often contain database credentials, API keys, and service account tokens that applications depend on at runtime. Deleting these can cause cascading failures across dependent services. Protects: `delete-secret`, `delete-parameter`, `delete-parameters`, `remove-regions-from-replication`
-- **secrets.onepassword** - Blocks destructive 1Password CLI (`op`) operations. 1Password vaults often contain shared team credentials and sensitive documents. Protects: `item delete`, `vault delete`, `document delete`
-- **secrets.doppler** - Blocks destructive Doppler secrets management operations. Doppler centralizes environment variables and secrets across development, staging, and production. Protects: `secrets delete`, `configs delete`, `projects delete`, `environments delete`
-
-### Monitoring Packs
-
-Monitoring and observability data is often irreplaceable - logs and metrics capture point-in-time system state that cannot be reconstructed after deletion. These packs protect against accidental destruction of monitoring infrastructure.
-
-- **monitoring.splunk** - Blocks destructive Splunk CLI operations. Splunk indexes can contain years of log data critical for security investigations, compliance audits, and debugging production issues. Protects: `remove index`, `clean eventdata`
-
-### Messaging Packs
-
-Message queues and event streaming platforms are often the backbone of distributed systems. Deleting topics, consumer groups, or records can cause data loss, break event-driven architectures, and disrupt downstream consumers.
-
-- **messaging.kafka** - Blocks destructive Apache Kafka CLI operations. Kafka topics and consumer group offsets represent critical streaming state. Protects: `kafka-topics --delete`, `kafka-consumer-groups --delete`, `kafka-consumer-groups --reset-offsets`, `kafka-delete-records`, `kafka-acls --remove`, `rpk topic delete`
-- **messaging.nats** - Blocks destructive NATS CLI operations including stream deletion, consumer removal, and key-value store purging
-- **messaging.rabbitmq** - Blocks destructive RabbitMQ operations including queue deletion, exchange removal, and vhost deletion via `rabbitmqadmin` and `rabbitmqctl`
-- **messaging.sqs_sns** - Blocks destructive AWS SQS and SNS operations. Message queues often contain unprocessed work that cannot be recovered. Protects: `sqs delete-queue`, `sqs purge-queue`, `sns delete-topic`, `sns unsubscribe`
-
-### Search Engine Packs
-
-Search indexes can take hours or days to rebuild and represent significant computational investment. These packs protect Elasticsearch, OpenSearch, and other search platforms from accidental index deletion or data corruption.
-
-- **search.elasticsearch** - Blocks destructive Elasticsearch REST API operations via curl/httpie. Protects: index deletion (`DELETE /index`), document deletion (`DELETE /_doc`), `_delete_by_query`, index close (`_close`), and cluster settings modifications
-- **search.opensearch** - Blocks destructive OpenSearch operations with patterns similar to Elasticsearch
-- **search.meilisearch** - Blocks destructive Meilisearch REST API operations including index deletion and document clearing
-- **search.algolia** - Blocks destructive Algolia CLI operations including index deletion and clearing
-
-### Backup Packs
-
-Backup systems are the last line of defense against data loss. Accidental deletion of snapshots, pruning of backup data, or removal of encryption keys can make recovery impossible when it's needed most.
-
-- **backup.restic** - Blocks destructive restic operations. Restic is a popular backup tool with powerful but dangerous commands. Protects: `restic forget` (removes snapshots), `restic prune` (removes unreferenced data), `restic key remove` (deletes encryption keys - can make backups unrecoverable), `restic unlock --remove-all`, `restic cache --cleanup`
-- **backup.velero** - Blocks destructive Velero operations (Kubernetes backup). Protects: `backup delete`, `schedule delete`, `restore delete`, `backup-location delete`, `snapshot-location delete`, `uninstall`
+### Core Packs (enabled by default)
+- `core.filesystem` - Protects against dangerous rm -rf commands outside temp directories
+- `core.git` - Protects against destructive git commands that can lose uncommitted work, rewrite history, or destroy stashes
 
 ### Storage Packs
-- **storage.s3** - Specialized protection for AWS S3. Covers bucket deletion, recursive object deletion, `s3 sync --delete`, and `s3api` delete operations.
+- `storage.s3` - Protects against destructive S3 operations like bucket removal, recursive deletes, and sync --delete.
+- `storage.gcs` - Protects against destructive GCS operations like bucket removal, object deletion, and recursive deletes.
+- `storage.minio` - Protects against destructive MinIO Client (mc) operations like bucket removal, object deletion, and admin operations.
+- `storage.azure_blob` - Protects against destructive Azure Blob Storage operations like container deletion, blob deletion, and azcopy remove.
+
+### Remote Packs
+- `remote.rsync` - Protects against destructive rsync operations like --delete and its variants.
+- `remote.scp` - Protects against destructive SCP operations like overwrites to system paths.
+- `remote.ssh` - Protects against destructive SSH operations like remote command execution and key management.
+
+### Database Packs
+- `database.postgresql` - Protects against destructive PostgreSQL operations like DROP DATABASE, TRUNCATE, and dropdb.
+- `database.mysql` - MySQL/MariaDB guard.
+- `database.mongodb` - Protects against destructive MongoDB operations like dropDatabase, dropCollection, and remove without criteria.
+- `database.redis` - Protects against destructive Redis operations like FLUSHALL, FLUSHDB, and mass key deletion.
+- `database.sqlite` - Protects against destructive SQLite operations like DROP TABLE, DELETE without WHERE, and accidental data loss.
+
+### Container Packs
+- `containers.docker` - Protects against destructive Docker operations like system prune, volume prune, and force removal.
+- `containers.compose` - Protects against destructive Docker Compose operations like down -v which removes volumes.
+- `containers.podman` - Protects against destructive Podman operations like system prune, volume prune, and force removal.
+
+### Kubernetes Packs
+- `kubernetes.kubectl` - Protects against destructive kubectl operations like delete namespace, drain, and mass deletion.
+- `kubernetes.helm` - Protects against destructive Helm operations like uninstall and rollback without dry-run.
+- `kubernetes.kustomize` - Protects against destructive Kustomize operations when combined with kubectl delete or applied without review.
+
+### Cloud Provider Packs
+- `cloud.aws` - Protects against destructive AWS CLI operations like terminate-instances, delete-db-instance, and s3 rm --recursive.
+- `cloud.azure` - Protects against destructive Azure CLI operations like vm delete, storage account delete, and resource group delete.
+- `cloud.gcp` - Protects against destructive gcloud operations like instances delete, sql instances delete, and gsutil rm -r.
+
+### CDN Packs
+- `cdn.cloudflare_workers` - Protects against destructive Cloudflare Workers, KV, R2, and D1 operations via the Wrangler CLI.
+- `cdn.cloudfront` - Protects against destructive AWS CloudFront operations like deleting distributions, cache policies, and functions.
+- `cdn.fastly` - Protects against destructive Fastly CLI operations like service, domain, backend, and VCL deletion.
+
+### API Gateway Packs
+- `apigateway.apigee` - Protects against destructive Google Apigee CLI and apigeecli operations.
+- `apigateway.aws` - Protects against destructive AWS API Gateway CLI operations for both REST APIs and HTTP APIs.
+- `apigateway.kong` - Protects against destructive Kong Gateway CLI, deck CLI, and Admin API operations.
+
+### Infrastructure Packs
+- `infrastructure.ansible` - Protects against destructive Ansible operations like dangerous shell commands and unchecked playbook runs.
+- `infrastructure.pulumi` - Protects against destructive Pulumi operations like destroy and up with -y (auto-approve).
+- `infrastructure.terraform` - Protects against destructive Terraform operations like destroy, taint, and apply with -auto-approve.
+
+### System Packs
+- `system.disk` - Protects against destructive disk operations like dd to devices, mkfs, and partition table modifications.
+- `system.permissions` - Protects against dangerous permission changes like chmod 777, recursive chmod/chown on system directories.
+- `system.services` - Protects against dangerous service operations like stopping critical services and modifying init configuration.
+
+### CI/CD Packs
+- `cicd.circleci` - Protects against destructive CircleCI operations like deleting contexts, removing secrets, deleting orbs/namespaces, or removing pipelines.
+- `cicd.github_actions` - Protects against destructive GitHub Actions operations like deleting secrets/variables or using gh api DELETE against /actions endpoints.
+- `cicd.gitlab_ci` - Protects against destructive GitLab CI/CD operations like deleting variables, removing artifacts, and unregistering runners.
+- `cicd.jenkins` - Protects against destructive Jenkins CLI/API operations like deleting jobs, nodes, credentials, or build history.
+
+### Secrets Management Packs
+- `secrets.aws_secrets` - Protects against destructive AWS Secrets Manager and SSM Parameter Store operations like delete-secret and delete-parameter.
+- `secrets.doppler` - Protects against destructive Doppler CLI operations like deleting secrets, configs, environments, or projects.
+- `secrets.onepassword` - Protects against destructive 1Password CLI operations like deleting items, documents, users, groups, and vaults.
+- `secrets.vault` - Protects against destructive Vault CLI operations like deleting secrets, disabling auth/secret engines, revoking leases/tokens, and deleting policies.
 
 ### Platform Packs
+- `platform.github` - Protects against destructive GitHub CLI operations like deleting repositories, gists, releases, or SSH keys.
+- `platform.gitlab` - Protects against destructive GitLab platform operations like deleting projects, releases, protected branches, and webhooks.
 
-Platform-level operations can have wide-reaching effects across repositories, pipelines, and team workflows.
+### DNS Packs
+- `dns.cloudflare` - Protects against destructive Cloudflare DNS operations like record deletion, zone deletion, and targeted Terraform destroy.
+- `dns.generic` - Protects against destructive or risky DNS tooling usage (nsupdate deletes, zone transfers).
+- `dns.route53` - Protects against destructive AWS Route53 DNS operations like hosted zone deletion and record set DELETE changes.
 
-- **platform.github** - Blocks destructive GitHub CLI (`gh`) operations beyond just CI/CD. Protects: repository deletion, release deletion, deployment deletion, environment deletion, secret/variable deletion, hook deletion
-- **platform.gitlab** - Blocks destructive GitLab CLI (`glab`) operations including project deletion, merge request closure, issue closure, release deletion, and variable deletion
+### Email Packs
+- `email.mailgun` - Protects against destructive Mailgun API operations like domain deletion, route deletion, and mailing list removal.
+- `email.postmark` - Protects against destructive Postmark API operations like server deletion, template deletion, and sender signature removal.
+- `email.sendgrid` - Protects against destructive SendGrid API operations like template deletion, API key deletion, and domain authentication removal.
+- `email.ses` - Protects against destructive AWS Simple Email Service operations like identity deletion, template deletion, and configuration set removal.
 
-### Heredoc Packs
-- **heredoc.bash** - Destructive bash operations inside heredocs/inline scripts
-- **heredoc.python** - Destructive Python operations inside heredocs/inline scripts
-- **heredoc.javascript** - Destructive JavaScript operations inside heredocs/inline scripts
-- **heredoc.typescript** - Destructive TypeScript operations inside heredocs/inline scripts
-- **heredoc.ruby** - Destructive Ruby operations inside heredocs/inline scripts
-- **heredoc.perl** - Destructive Perl operations inside heredocs/inline scripts
-- **heredoc.go** - Destructive Go operations inside heredocs/inline scripts
+### Feature Flag Packs
+- `featureflags.flipt` - Protects against destructive Flipt CLI and API operations.
+- `featureflags.launchdarkly` - Protects against destructive LaunchDarkly CLI and API operations.
+- `featureflags.split` - Protects against destructive Split.io CLI and API operations.
+- `featureflags.unleash` - Protects against destructive Unleash CLI and API operations.
+
+### Load Balancer Packs
+- `loadbalancer.elb` - Protects against destructive AWS Elastic Load Balancing (ELB/ALB/NLB) operations like deleting load balancers, target groups, or deregistering targets from live traffic.
+- `loadbalancer.haproxy` - Protects against destructive HAProxy load balancer operations like stopping the service or disabling backends via runtime API.
+- `loadbalancer.nginx` - Protects against destructive nginx load balancer operations like stopping the service or deleting config files.
+- `loadbalancer.traefik` - Protects against destructive Traefik load balancer operations like stopping containers, deleting config, or API deletions.
+
+### Messaging Packs
+- `messaging.kafka` - Protects against destructive Kafka CLI operations like deleting topics, removing consumer groups, resetting offsets, and deleting records.
+- `messaging.nats` - Protects against destructive NATS/JetStream operations like deleting streams, consumers, key-value entries, objects, and accounts.
+- `messaging.rabbitmq` - Protects against destructive RabbitMQ operations like deleting queues/exchanges, purging queues, deleting vhosts, and resetting cluster state.
+- `messaging.sqs_sns` - Protects against destructive AWS SQS and SNS operations like deleting queues, purging messages, deleting topics, and removing subscriptions.
+
+### Monitoring Packs
+- `monitoring.datadog` - Protects against destructive Datadog CLI/API operations like deleting monitors and dashboards.
+- `monitoring.newrelic` - Protects against destructive New Relic CLI/API operations like deleting entities or alerting resources.
+- `monitoring.pagerduty` - Protects against destructive PagerDuty CLI/API operations like deleting services and schedules (which can break incident routing).
+- `monitoring.prometheus` - Protects against destructive Prometheus/Grafana operations like deleting time series data or dashboards/datasources.
+- `monitoring.splunk` - Protects against destructive Splunk CLI/API operations like index removal and REST API DELETE calls.
+
+### Payment Packs
+- `payment.braintree` - Protects against destructive Braintree/PayPal payment operations like deleting customers or cancelling subscriptions via API/SDK calls.
+- `payment.square` - Protects against destructive Square CLI/API operations like deleting catalog objects or customers (which can break payment flows).
+- `payment.stripe` - Protects against destructive Stripe CLI/API operations like deleting webhook endpoints and customers, or rotating API keys without coordination.
+
+### Search Engine Packs
+- `search.algolia` - Protects against destructive Algolia operations like deleting indices, clearing objects, removing rules/synonyms, and deleting API keys.
+- `search.elasticsearch` - Protects against destructive Elasticsearch REST API operations like index deletion, delete-by-query, index close, and cluster setting changes.
+- `search.meilisearch` - Protects against destructive Meilisearch REST API operations like index deletion, document deletion, delete-batch, and API key removal.
+- `search.opensearch` - Protects against destructive OpenSearch REST API operations and AWS CLI domain deletions.
+
+### Backup Packs
+- `backup.borg` - Protects against destructive borg operations like delete, prune, compact, and recreate.
+- `backup.rclone` - Protects against destructive rclone operations like sync, delete, purge, dedupe, and move.
+- `backup.restic` - Protects against destructive restic operations like forgetting snapshots, pruning data, removing keys, and cache cleanup.
+- `backup.velero` - Protects against destructive velero operations like deleting backups, schedules, and locations.
 
 ### Other Packs
-- **strict_git** - Extra paranoid git protections for teams requiring additional safety margins
-- **package_managers** - Blocks dangerous package manager operations across ecosystems. Publishing a package is often irreversible (npm, PyPI, Maven Central have strict policies on unpublishing), and removing dependencies can break builds. Protects:
-  - **npm/yarn/pnpm**: `unpublish` (removes published packages)
-  - **pip**: `uninstall` (removes installed packages), `install` from raw URLs (security risk)
-  - **cargo**: `yank` (marks crate versions as yanked)
-  - **gem**: `yank` (removes gem versions)
-  - **poetry**: `publish` (publishes to PyPI), `remove` (removes dependencies)
-  - **maven**: `deploy` (publishes to repository), `release:perform` (performs release)
-  - **gradle**: `publish` (uploads artifacts)
-  - **apt/yum/dnf**: removal of critical system packages
-  - **brew**: `uninstall` (removes packages)
+- `package_managers` - Protects against dangerous package manager operations like publishing packages and removing critical system packages.
+- `strict_git` - Stricter git protections: blocks all force pushes, rebases, and history rewriting operations.
 
 Enable packs in `~/.config/dcg/config.toml`:
 
