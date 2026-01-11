@@ -610,6 +610,15 @@ jobs:
             echo '```' >> $GITHUB_STEP_SUMMARY
           fi
 
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Failure Details" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            tail -80 scan_regression.log >> $GITHUB_STEP_SUMMARY || true
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
           exit 0
 
       - name: Upload scan regression artifacts

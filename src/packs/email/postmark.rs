@@ -2,10 +2,12 @@
 //!
 //! Covers destructive operations:
 //! - Server deletion
-//! - Template deletion
+//! - Template deletion (supports numeric IDs and string aliases)
 //! - Domain deletion
 //! - Sender signature deletion
 //! - Webhook deletion
+//! - Message stream deletion (supports hyphenated names)
+//! - Suppression deletion
 
 use crate::destructive_pattern;
 use crate::packs::{DestructivePattern, Pack, SafePattern};
@@ -42,7 +44,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Template deletion
         destructive_pattern!(
             "postmark-delete-template",
-            r"(?:-X\s*DELETE|--request\s+DELETE).*api\.postmarkapp\.com/templates/|api\.postmarkapp\.com/templates/\d+.*(?:-X\s*DELETE|--request\s+DELETE)",
+            r"(?:-X\s*DELETE|--request\s+DELETE).*api\.postmarkapp\.com/templates/|api\.postmarkapp\.com/templates/[^\s/]+.*(?:-X\s*DELETE|--request\s+DELETE)",
             "DELETE to Postmark /templates removes an email template."
         ),
         // Domain deletion
@@ -72,7 +74,7 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         // Message stream deletion (must not have additional path after stream name)
         destructive_pattern!(
             "postmark-delete-message-stream",
-            r"(?:-X\s*DELETE|--request\s+DELETE).*api\.postmarkapp\.com/message-streams/\w+(?:\s|$)|api\.postmarkapp\.com/message-streams/\w+(?:\s|$).*(?:-X\s*DELETE|--request\s+DELETE)",
+            r"(?:-X\s*DELETE|--request\s+DELETE).*api\.postmarkapp\.com/message-streams/[\w-]+(?:\s|$)|api\.postmarkapp\.com/message-streams/[\w-]+(?:\s|$).*(?:-X\s*DELETE|--request\s+DELETE)",
             "DELETE to Postmark /message-streams removes a message stream."
         ),
     ]
@@ -166,6 +168,50 @@ mod tests {
             &pack,
             "curl -X DELETE https://api.postmarkapp.com/message-streams/outbound/suppressions/delete",
             "postmark-delete-suppression",
+        );
+    }
+
+    #[test]
+    fn blocks_url_first_ordering() {
+        let pack = create_pack();
+        // URL before -X DELETE flag (common curl pattern)
+        assert_blocks_with_pattern(
+            &pack,
+            "curl https://api.postmarkapp.com/servers/12345 -X DELETE",
+            "postmark-delete-server",
+        );
+        assert_blocks_with_pattern(
+            &pack,
+            "curl https://api.postmarkapp.com/templates/67890 -X DELETE",
+            "postmark-delete-template",
+        );
+    }
+
+    #[test]
+    fn blocks_template_with_string_alias() {
+        let pack = create_pack();
+        // Template aliases can be strings, not just numeric IDs
+        assert_blocks_with_pattern(
+            &pack,
+            "curl -X DELETE https://api.postmarkapp.com/templates/my-welcome-template",
+            "postmark-delete-template",
+        );
+        // URL-first with alias
+        assert_blocks_with_pattern(
+            &pack,
+            "curl https://api.postmarkapp.com/templates/password-reset -X DELETE",
+            "postmark-delete-template",
+        );
+    }
+
+    #[test]
+    fn blocks_message_stream_with_hyphen() {
+        let pack = create_pack();
+        // Message stream names can contain hyphens
+        assert_blocks_with_pattern(
+            &pack,
+            "curl -X DELETE https://api.postmarkapp.com/message-streams/my-custom-stream",
+            "postmark-delete-message-stream",
         );
     }
 }

@@ -1066,12 +1066,13 @@ impl PackRegistry {
     /// 1. **Tier 1 (core/storage/remote)**: `core.*`, `storage.*`, `remote.*` packs - most fundamental protections
     /// 2. **Tier 2 (system)**: `system.*` - disk, permissions, services
     /// 3. **Tier 3 (infrastructure)**: `infrastructure.*` - terraform, ansible, pulumi
-    /// 4. **Tier 4 (cloud/dns/platform)**: `cloud.*`, `dns.*`, `platform.*`
+    /// 4. **Tier 4 (apigateway/cloud/dns/platform/cdn/loadbalancer)**: `apigateway.*`, `cloud.*`, `dns.*`, `platform.*`, `cdn.*`, `loadbalancer.*`
     /// 5. **Tier 5 (kubernetes)**: `kubernetes.*` - kubectl, helm, kustomize
     /// 6. **Tier 6 (containers)**: `containers.*` - docker, compose, podman
     /// 7. **Tier 7 (database/search/messaging/backup)**: `database.*`, `search.*`, `messaging.*`, `backup.*`
     /// 8. **Tier 8 (`package_managers`)**: package manager protections
     /// 9. **Tier 9 (`strict_git`)**: extra git paranoia
+    /// 10. **Tier 10 (services)**: `cicd.*`, `email.*`, `featureflags.*`, `secrets.*`, `monitoring.*`, `payment.*`
     ///
     /// Within each tier, packs are sorted lexicographically by ID.
     #[must_use]
@@ -1105,13 +1106,13 @@ impl PackRegistry {
             "core" | "storage" | "remote" => 1,
             "system" => 2,
             "infrastructure" => 3,
-            "apigateway" | "cloud" | "dns" | "platform" => 4,
+            "apigateway" | "cdn" | "cloud" | "dns" | "loadbalancer" | "platform" => 4,
             "kubernetes" => 5,
             "containers" => 6,
             "backup" | "database" | "messaging" | "search" => 7,
             "package_managers" => 8,
             "strict_git" => 9,
-            "cicd" | "secrets" | "monitoring" | "payment" => 10, // CI/CD + secrets + monitoring + payment tooling
+            "cicd" | "email" | "featureflags" | "secrets" | "monitoring" | "payment" => 10, // CI/CD + email + feature flags + secrets + monitoring + payment tooling
             _ => 11,                                             // Unknown categories go last
         }
     }
