@@ -102,11 +102,12 @@ draw_box() {
   shift
   local lines=("$@")
   local max_width=0
+  local strip_ansi_sed=$'s/\033\\[[0-9;]*m//g'
 
   # Calculate max width (strip ANSI codes for accurate measurement)
   for line in "${lines[@]}"; do
     local stripped
-    stripped=$(echo -e "$line" | sed 's/\x1b\[[0-9;]*m//g')
+    stripped=$(printf '%b' "$line" | sed "$strip_ansi_sed")
     local len=${#stripped}
     if [ "$len" -gt "$max_width" ]; then
       max_width=$len
@@ -121,23 +122,23 @@ draw_box() {
   done
 
   # Draw top border
-  echo -e "\033[${color}m╔${border}╗\033[0m"
+  printf "\033[%sm╔%s╗\033[0m\n" "$color" "$border"
 
   # Draw each line with padding
   for line in "${lines[@]}"; do
     local stripped
-    stripped=$(echo -e "$line" | sed 's/\x1b\[[0-9;]*m//g')
+    stripped=$(printf '%b' "$line" | sed "$strip_ansi_sed")
     local len=${#stripped}
     local padding=$((max_width - len))
     local pad_str=""
     for ((i=0; i<padding; i++)); do
       pad_str+=" "
     done
-    echo -e "\033[${color}m║\033[0m  ${line}${pad_str}  \033[${color}m║\033[0m"
+    printf "\033[%sm║\033[0m  %b%s  \033[%sm║\033[0m\n" "$color" "$line" "$pad_str" "$color"
   done
 
   # Draw bottom border
-  echo -e "\033[${color}m╚${border}╝\033[0m"
+  printf "\033[%sm╚%s╝\033[0m\n" "$color" "$border"
 }
 
 resolve_version() {
