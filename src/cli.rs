@@ -1769,7 +1769,8 @@ fn handle_scan(
     };
 
     // Apply include/exclude filters
-    let filtered_paths = filter_paths(&scan_paths_list, include, exclude);
+    let repo_root = find_repo_root_from_cwd();
+    let filtered_paths = filter_paths(&scan_paths_list, include, exclude, repo_root.as_deref());
 
     if verbose {
         eprintln!(
@@ -1926,25 +1927,71 @@ fn filter_paths(
     paths: &[std::path::PathBuf],
     include: &[String],
     exclude: &[String],
+    repo_root: Option<&std::path::Path>,
 ) -> Vec<std::path::PathBuf> {
     paths
         .iter()
         .filter(|p| {
-            let path_str = p.to_string_lossy();
+            let candidates = build_glob_candidates(p, repo_root);
 
             // If include patterns are specified, path must match at least one
             if !include.is_empty() {
-                let matches_include = include.iter().any(|pattern| glob_match(pattern, &path_str));
+                let matches_include = include.iter().any(|pattern| {
+                    candidates
+                        .iter()
+                        .any(|candidate| glob_match(pattern, candidate))
+                });
                 if !matches_include {
                     return false;
                 }
             }
 
             // Path must not match any exclude pattern
-            !exclude.iter().any(|pattern| glob_match(pattern, &path_str))
+            !exclude.iter().any(|pattern| {
+                candidates
+                    .iter()
+                    .any(|candidate| glob_match(pattern, candidate))
+            })
         })
         .cloned()
         .collect()
+}
+
+fn build_glob_candidates(
+    path: &std::path::Path,
+    repo_root: Option<&std::path::Path>,
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+
+    let raw = path.to_string_lossy().to_string();
+    let raw_norm = raw.replace('\\', "/");
+    candidates.push(raw_norm.clone());
+
+    if let Some(stripped) = raw_norm.strip_prefix("./") {
+        candidates.push(stripped.to_string());
+    }
+
+    if let Some(root) = repo_root {
+        let joined = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        };
+
+        if let Ok(rel) = joined.strip_prefix(root) {
+            let rel_norm = rel.to_string_lossy().replace('\\', "/");
+            if !rel_norm.is_empty() {
+                candidates.push(rel_norm.clone());
+                if let Some(stripped) = rel_norm.strip_prefix("./") {
+                    candidates.push(stripped.to_string());
+                }
+            }
+        }
+    }
+
+    candidates.sort();
+    candidates.dedup();
+    candidates
 }
 
 /// Simple glob matching (supports * and **).
@@ -6649,6 +6696,43 @@ mod tests {
         assert!(
             result.is_err(),
             "args should conflict with scan subcommands"
+        );
+    }
+
+    #[test]
+    fn filter_paths_matches_repo_relative_include_for_absolute_paths() {
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let repo_root = temp.path().join("repo");
+        std::fs::create_dir_all(repo_root.join("src")).unwrap();
+
+        let file_path = repo_root.join("src").join("main.rs");
+        let paths = vec![file_path.clone()];
+        let include = vec!["src/**".to_string()];
+        let exclude = Vec::new();
+
+        let filtered = filter_paths(&paths, &include, &exclude, Some(&repo_root));
+        assert_eq!(filtered, vec![file_path]);
+    }
+
+    #[test]
+    fn filter_paths_excludes_repo_relative_glob_for_absolute_paths() {
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let repo_root = temp.path().join("repo");
+        std::fs::create_dir_all(repo_root.join("target")).unwrap();
+
+        let file_path = repo_root.join("target").join("artifact.bin");
+        let paths = vec![file_path];
+        let include = Vec::new();
+        let exclude = vec!["target/**".to_string()];
+
+        let filtered = filter_paths(&paths, &include, &exclude, Some(&repo_root));
+        assert!(
+            filtered.is_empty(),
+            "target/** should exclude repo-relative paths"
         );
     }
 
