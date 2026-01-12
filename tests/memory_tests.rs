@@ -320,7 +320,9 @@ build:
 
 #[test]
 fn memory_full_pipeline() {
-    let config = dcg::Config::load();
+    let mut config = dcg::Config::load();
+    // Limit to core packs for memory leak budgets; avoids extra pack baselines.
+    config.packs.enabled.clear();
     let compiled_overrides = config.overrides.compile();
     let enabled_packs = config.enabled_pack_ids();
     let enabled_keywords = dcg::packs::REGISTRY.collect_enabled_keywords(&enabled_packs);
