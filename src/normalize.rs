@@ -682,8 +682,8 @@ fn strip_command_wrapper(command: &str) -> Option<(String, StrippedWrapper)> {
             break;
         }
         if word.starts_with("--") {
-            // Unknown long option - stop
-            break;
+            // Unknown long option - not safe to strip
+            return None;
         }
 
         let mut unknown = false;
@@ -701,7 +701,7 @@ fn strip_command_wrapper(command: &str) -> Option<(String, StrippedWrapper)> {
             }
         }
         if unknown {
-            break;
+            return None;
         }
 
         idx = word_end;
@@ -1529,6 +1529,18 @@ mod tests {
     fn test_command_p_wrapper() {
         let result = strip_wrapper_prefixes("command -p git reset --hard");
         assert_eq!(result.normalized, "git reset --hard");
+    }
+
+    #[test]
+    fn test_command_unknown_flag_does_not_strip() {
+        let result = strip_wrapper_prefixes("command -x git reset --hard");
+        assert!(!result.was_normalized());
+    }
+
+    #[test]
+    fn test_command_unknown_long_flag_does_not_strip() {
+        let result = strip_wrapper_prefixes("command --foo git reset --hard");
+        assert!(!result.was_normalized());
     }
 
     #[test]
