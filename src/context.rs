@@ -1115,7 +1115,8 @@ impl WrapperState {
     #[inline]
     #[must_use]
     fn from_command_word(word: &str) -> Option<Self> {
-        match word {
+        let base_name = word.rsplit('/').next().unwrap_or(word);
+        match base_name {
             "sudo" => Some(Self::Sudo {
                 options_ended: false,
                 pending_value: false,
@@ -2642,6 +2643,16 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_handles_sudo_wrapper_with_path() {
+        let cmd = r#"/usr/bin/sudo git commit -m "Fix rm -rf detection""#;
+        let sanitized = sanitize_for_pattern_matching(cmd);
+
+        assert!(matches!(sanitized, std::borrow::Cow::Owned(_)));
+        assert!(!sanitized.as_ref().contains("rm -rf"));
+        assert!(sanitized.as_ref().contains("/usr/bin/sudo git commit -m"));
+    }
+
+    #[test]
     fn sanitize_handles_sudo_u_wrapper() {
         let cmd = r#"sudo -u root git commit -m "Fix rm -rf detection""#;
         let sanitized = sanitize_for_pattern_matching(cmd);
@@ -2659,6 +2670,16 @@ mod tests {
         assert!(matches!(sanitized, std::borrow::Cow::Owned(_)));
         assert!(!sanitized.as_ref().contains("rm -rf"));
         assert!(sanitized.as_ref().contains("env -u FOO rg -n"));
+    }
+
+    #[test]
+    fn sanitize_handles_env_unset_wrapper_with_path() {
+        let cmd = r#"/usr/bin/env -u FOO rg -n "rm -rf" src/main.rs"#;
+        let sanitized = sanitize_for_pattern_matching(cmd);
+
+        assert!(matches!(sanitized, std::borrow::Cow::Owned(_)));
+        assert!(!sanitized.as_ref().contains("rm -rf"));
+        assert!(sanitized.as_ref().contains("/usr/bin/env -u FOO rg -n"));
     }
 
     #[test]
