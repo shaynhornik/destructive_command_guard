@@ -925,6 +925,7 @@ pub fn sanitize_for_pattern_matching(command: &str) -> Cow<'_, str> {
     let mut options_ended = false;
     let mut search_pattern_masked = false;
     let mut wrapper: WrapperState = WrapperState::None;
+    let mut command_query_mode = false;
 
     for (i, token) in tokens.iter().enumerate() {
         if token.kind == SanitizeTokenKind::Separator {
@@ -934,6 +935,7 @@ pub fn sanitize_for_pattern_matching(command: &str) -> Cow<'_, str> {
             options_ended = false;
             search_pattern_masked = false;
             wrapper = WrapperState::None;
+            command_query_mode = false;
             continue;
         }
 
@@ -951,11 +953,29 @@ pub fn sanitize_for_pattern_matching(command: &str) -> Cow<'_, str> {
             continue;
         }
 
+        if command_query_mode {
+            // `command -v/-V` is query-only; treat all remaining args as data.
+            if !token.has_inline_code {
+                mask_ranges.push(token.byte_range.clone());
+            }
+            continue;
+        }
+
         if segment_cmd.is_none() {
             // Wrapper / prefix handling: allow stacked wrappers like `sudo env VAR=1 git ...`.
             if let Some(next_wrapper) = WrapperState::from_command_word(token_text) {
                 wrapper = next_wrapper;
                 continue;
+            }
+            if matches!(
+                wrapper,
+                WrapperState::Command {
+                    options_ended: false,
+                    ..
+                }
+            ) && command_option_is_query(token_text)
+            {
+                command_query_mode = true;
             }
             let (next_wrapper, skip) = wrapper.consume_token(token_text);
             wrapper = next_wrapper;
@@ -1354,6 +1374,16 @@ fn env_option_takes_value(token: &str) -> Option<WrapperOptionValueMode> {
     }
 
     None
+}
+
+#[inline]
+#[must_use]
+fn command_option_is_query(token: &str) -> bool {
+    if !token.starts_with('-') || token == "--" || token.starts_with("--") || token.len() <= 1 {
+        return false;
+    }
+
+    token[1..].bytes().any(|b| b == b'v' || b == b'V')
 }
 
 #[inline]
@@ -2680,6 +2710,35 @@ mod tests {
         assert!(matches!(sanitized, std::borrow::Cow::Owned(_)));
         assert!(!sanitized.as_ref().contains("rm -rf"));
         assert!(sanitized.as_ref().contains("/usr/bin/env -u FOO rg -n"));
+    }
+
+    #[test]
+    fn sanitize_masks_command_query_v() {
+        let cmd = r#"command -v "rm -rf""#;
+        let sanitized = sanitize_for_pattern_matching(cmd);
+
+        assert!(matches!(sanitized, std::borrow::Cow::Owned(_)));
+        assert!(!sanitized.as_ref().contains("rm -rf"));
+        assert!(sanitized.as_ref().contains("command -v"));
+    }
+
+    #[test]
+    fn sanitize_masks_command_query_v_combined() {
+        let cmd = r#"command -pv "rm -rf""#;
+        let sanitized = sanitize_for_pattern_matching(cmd);
+
+        assert!(matches!(sanitized, std::borrow::Cow::Owned(_)));
+        assert!(!sanitized.as_ref().contains("rm -rf"));
+        assert!(sanitized.as_ref().contains("command -pv"));
+    }
+
+    #[test]
+    fn sanitize_does_not_mask_command_p_wrapper() {
+        let cmd = r"command -p rm -rf /tmp";
+        let sanitized = sanitize_for_pattern_matching(cmd);
+
+        assert!(matches!(sanitized, std::borrow::Cow::Borrowed(_)));
+        assert!(sanitized.as_ref().contains("rm -rf"));
     }
 
     #[test]
