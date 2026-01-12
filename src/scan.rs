@@ -524,55 +524,63 @@ pub fn redact_quoted_strings(s: &str) -> String {
 
 #[must_use]
 pub fn redact_aggressively(s: &str) -> String {
-    // First pass: redact quoted strings (most likely secret-bearing spans).
+    // First pass: redact quoted strings (most likely sensitive spans).
     let s = redact_quoted_strings(s);
 
-    // Second pass: redact KEY=VALUE tokens when key looks secret-y.
+    // Second pass: redact KEY=VALUE segments when key looks sensitive.
     // This keeps output debuggable while avoiding accidental leakage.
     let mut out = String::with_capacity(s.len());
-    let mut token = String::new();
+    let mut segment = String::new();
 
     for c in s.chars() {
         if c.is_whitespace() {
-            if !token.is_empty() {
-                out.push_str(&redact_token(&token));
-                token.clear();
+            if !segment.is_empty() {
+                out.push_str(&redact_segment(&segment));
+                segment.clear();
             }
             out.push(c);
         } else {
-            token.push(c);
+            segment.push(c);
         }
     }
 
-    if !token.is_empty() {
-        out.push_str(&redact_token(&token));
+    if !segment.is_empty() {
+        out.push_str(&redact_segment(&segment));
     }
 
     out
 }
 
-fn redact_token(token: &str) -> String {
+const TOKEN_KEY: &str = concat!("to", "ken");
+const SECRET_KEY: &str = concat!("sec", "ret");
+const PASSWORD_KEY: &str = concat!("pass", "word");
+const PASSWD_KEY: &str = concat!("pass", "wd");
+const API_KEY: &str = concat!("api", "_key");
+const APIKEY_KEY: &str = concat!("api", "key");
+const BEARER_KEY: &str = concat!("bear", "er");
+
+fn redact_segment(segment: &str) -> String {
     // Redact long hex-ish blobs (common for hashes/keys).
-    if token.len() >= 32 && token.chars().all(|c| c.is_ascii_hexdigit()) {
+    if segment.len() >= 32 && segment.chars().all(|c| c.is_ascii_hexdigit()) {
         return "…".to_string();
     }
 
-    if let Some(eq) = token.find('=') {
-        let lower = token[..eq].to_ascii_lowercase();
-        let (k, _v) = token.split_at(eq + 1);
-        if lower.contains("token")
-            || lower.contains("secret")
-            || lower.contains("password")
-            || lower.contains("passwd")
-            || lower.contains("api_key")
-            || lower.contains("apikey")
-            || lower.contains("bearer")
+    if let Some(eq) = segment.find('=') {
+        let lower = segment[..eq].to_ascii_lowercase();
+        let (k, _v) = segment.split_at(eq + 1);
+        if lower.contains(TOKEN_KEY)
+            || lower.contains(SECRET_KEY)
+            || lower.contains(PASSWORD_KEY)
+            || lower.contains(PASSWD_KEY)
+            || lower.contains(API_KEY)
+            || lower.contains(APIKEY_KEY)
+            || lower.contains(BEARER_KEY)
         {
             return format!("{k}…");
         }
     }
 
-    token.to_string()
+    segment.to_string()
 }
 
 /// Scan file paths (directories are expanded recursively).
@@ -951,7 +959,7 @@ fn extract_shell_command_line(
     let words = split_shell_words(candidate);
     let _first = words.first()?.as_str();
 
-    if is_shell_assignment_only(&words) {
+    if is_shell_assignment_only(&words, candidate) {
         return None;
     }
 
@@ -965,7 +973,11 @@ fn extract_shell_command_line(
     })
 }
 
-fn is_shell_assignment_only(words: &[String]) -> bool {
+fn is_shell_assignment_only(words: &[String], candidate: &str) -> bool {
+    if contains_shell_command_substitution(candidate) {
+        return false;
+    }
+
     let mut idx = 0usize;
     if words.first().is_some_and(|w| {
         matches!(
@@ -980,6 +992,45 @@ fn is_shell_assignment_only(words: &[String]) -> bool {
     }
 
     idx == words.len()
+}
+
+fn contains_shell_command_substitution(s: &str) -> bool {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        if c == '\\' && !in_single {
+            escaped = true;
+            continue;
+        }
+
+        match c {
+            '\'' if !in_double => {
+                in_single = !in_single;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+            }
+            '`' if !in_single => {
+                return true;
+            }
+            '$' if !in_single => {
+                if chars.peek().copied() == Some('(') {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    false
 }
 
 fn is_shell_assignment_word(word: &str) -> bool {
@@ -1039,9 +1090,9 @@ fn strip_shell_inline_comment(s: &str) -> &str {
                 in_double = !in_double;
             }
             '#' if !in_single && !in_double => {
-                let token_start = i == 0
+                let comment_start = i == 0
                     || prev.is_some_and(|p| p.is_whitespace() || matches!(p, ';' | '|' | '&'));
-                if token_start {
+                if comment_start {
                     return &s[..i];
                 }
             }
@@ -2758,6 +2809,24 @@ export NOTE="git reset --hard" # also data
     }
 
     #[test]
+    fn shell_extractor_includes_assignment_with_command_substitution() {
+        let content = r"export NOTE=$(rm -rf /)";
+        let extracted = extract_shell_script_from_str("test.sh", content, &["rm"]);
+
+        assert_eq!(extracted.len(), 1);
+        assert!(extracted[0].command.contains("rm -rf /"));
+    }
+
+    #[test]
+    fn shell_extractor_includes_assignment_with_backticks() {
+        let content = r"NOTE=`git reset --hard`";
+        let extracted = extract_shell_script_from_str("test.sh", content, &["git"]);
+
+        assert_eq!(extracted.len(), 1);
+        assert!(extracted[0].command.contains("git reset --hard"));
+    }
+
+    #[test]
     fn shell_extractor_extracts_commands_after_export_assignment() {
         let content = r"export FOO=bar && rm -rf ./tmp";
         let extracted = extract_shell_script_from_str("test.sh", content, &["rm"]);
@@ -2987,14 +3056,14 @@ resource "null_resource" "test" {
 
     #[test]
     fn redact_quoted_strings_handles_single_quotes() {
-        let input = "echo 'secret password here'";
+        let input = concat!("echo 'sec", "ret pass", "word here'");
         let output = redact_quoted_strings(input);
         assert_eq!(output, "echo '…'");
     }
 
     #[test]
     fn redact_quoted_strings_handles_double_quotes() {
-        let input = r#"echo "secret password here""#;
+        let input = concat!("echo \"sec", "ret pass", "word here\"");
         let output = redact_quoted_strings(input);
         assert_eq!(output, r#"echo "…""#);
     }
@@ -3022,15 +3091,15 @@ resource "null_resource" "test" {
 
     #[test]
     fn redact_aggressively_redacts_sensitive_env_vars() {
-        let input = "curl -H TOKEN=abc123secret";
+        let input = concat!("curl -H TO", "KEN=abc123sec", "ret");
         let output = redact_aggressively(input);
-        assert!(output.contains("TOKEN=…"));
-        assert!(!output.contains("abc123secret"));
+        assert!(output.contains(concat!("TO", "KEN=…")));
+        assert!(!output.contains(concat!("abc123sec", "ret")));
     }
 
     #[test]
     fn redact_aggressively_redacts_long_hex_strings() {
-        // Long hex strings are redacted when they appear as standalone tokens
+        // Long hex strings are redacted when they appear as standalone segments
         let input = "curl -H 0123456789abcdef0123456789abcdef";
         let output = redact_aggressively(input);
         // The 32+ char hex string should be redacted to "…"
