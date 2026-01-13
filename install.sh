@@ -408,6 +408,7 @@ echo ""
 PREDECESSOR_SCRIPT="git_safety_guard.py"
 PREDECESSOR_FOUND=0
 PREDECESSOR_LOCATIONS=()
+REMOVE_PREDECESSOR=1  # Default to removing predecessor if found
 
 detect_predecessor() {
   # Check common file locations
