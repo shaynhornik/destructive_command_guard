@@ -126,7 +126,8 @@ mod explain_tests {
 
     #[test]
     fn explain_dangerous_command_returns_deny_pretty() {
-        let output = run_dcg(&["explain", "docker system prune -a --volumes"]);
+        // Use git command since core.git is always enabled
+        let output = run_dcg(&["explain", "git reset --hard"]);
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         // Note: explain returns success even for deny decisions
@@ -134,12 +135,13 @@ mod explain_tests {
             stdout.contains("Decision: DENY"),
             "should show DENY decision"
         );
-        assert!(stdout.contains("containers.docker"), "should mention pack");
+        assert!(stdout.contains("core.git"), "should mention pack");
     }
 
     #[test]
     fn explain_json_format_is_valid() {
-        let output = run_dcg(&["explain", "--format", "json", "docker system prune"]);
+        // Use git command since core.git is always enabled
+        let output = run_dcg(&["explain", "--format", "json", "git reset --hard"]);
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         // Parse as JSON to validate structure
@@ -158,7 +160,8 @@ mod explain_tests {
 
     #[test]
     fn explain_json_includes_suggestions_for_blocked_commands() {
-        let output = run_dcg(&["explain", "--format", "json", "docker system prune -a"]);
+        // Use git command since core.git is always enabled
+        let output = run_dcg(&["explain", "--format", "json", "git reset --hard"]);
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
@@ -972,7 +975,8 @@ mod scan_tests {
     #[test]
     fn scan_dangerous_file_returns_nonzero() {
         let mut file = tempfile::Builder::new().suffix(".sh").tempfile().unwrap();
-        writeln!(file, "docker system prune -a").unwrap();
+        // Use git command since core.git is always enabled
+        writeln!(file, "git reset --hard").unwrap();
         file.flush().unwrap(); // Ensure content is written before dcg reads it
 
         let output = run_dcg(&["scan", "--paths", file.path().to_str().unwrap()]);
@@ -986,7 +990,8 @@ mod scan_tests {
     #[test]
     fn scan_json_format_is_valid() {
         let mut file = tempfile::Builder::new().suffix(".sh").tempfile().unwrap();
-        writeln!(file, "docker system prune").unwrap();
+        // Use git command since core.git is always enabled
+        writeln!(file, "git reset --hard").unwrap();
         file.flush().unwrap();
 
         let output = run_dcg(&[
@@ -1046,7 +1051,8 @@ mod scan_tests {
     #[test]
     fn scan_markdown_format_produces_valid_output() {
         let mut file = tempfile::Builder::new().suffix(".sh").tempfile().unwrap();
-        writeln!(file, "docker system prune -a --volumes").unwrap();
+        // Use git command since core.git is always enabled
+        writeln!(file, "git reset --hard HEAD~1").unwrap();
         file.flush().unwrap();
 
         let output = run_dcg(&[
@@ -1068,7 +1074,8 @@ mod scan_tests {
     #[test]
     fn scan_fail_on_none_always_succeeds() {
         let mut file = tempfile::Builder::new().suffix(".sh").tempfile().unwrap();
-        writeln!(file, "docker system prune").unwrap();
+        // Use git command since core.git is always enabled
+        writeln!(file, "git reset --hard").unwrap();
         file.flush().unwrap();
 
         let output = run_dcg(&[
@@ -1098,7 +1105,8 @@ mod scan_tests {
     fn scan_findings_include_file_and_line() {
         let mut file = tempfile::Builder::new().suffix(".sh").tempfile().unwrap();
         writeln!(file, "echo safe").unwrap();
-        writeln!(file, "docker system prune").unwrap();
+        // Use git command since core.git is always enabled
+        writeln!(file, "git reset --hard").unwrap();
         file.flush().unwrap();
 
         let output = run_dcg(&[
@@ -1148,7 +1156,8 @@ mod test_command_tests {
 
     #[test]
     fn test_dangerous_command_returns_blocked() {
-        let output = run_dcg(&["test", "docker system prune -a"]);
+        // Use git command since core.git is always enabled
+        let output = run_dcg(&["test", "git reset --hard"]);
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         // Note: test command currently returns exit code 0 even for blocked commands
@@ -1158,19 +1167,20 @@ mod test_command_tests {
             "should show blocked result"
         );
         assert!(
-            stdout.contains("containers.docker"),
+            stdout.contains("core.git"),
             "should mention the pack that blocked it"
         );
     }
 
     #[test]
     fn test_output_includes_rule_info() {
-        let output = run_dcg(&["test", "docker system prune"]);
+        // Use git command since core.git is always enabled
+        let output = run_dcg(&["test", "git reset --hard"]);
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         // The output should include pattern information
         assert!(
-            stdout.contains("system-prune") || stdout.contains("Pattern"),
+            stdout.contains("hard-reset") || stdout.contains("Pattern"),
             "should include pattern info"
         );
     }
@@ -1815,7 +1825,8 @@ mod simulate_tests {
 
     #[test]
     fn simulate_json_format_is_valid() {
-        let content = "git status\ndocker system prune -a\necho hello\n";
+        // Use git command since core.git is always enabled
+        let content = "git status\ngit reset --hard\necho hello\n";
         let file = create_temp_log_file(content);
 
         let output = run_simulate_file(file.path().to_str().unwrap(), &["--format", "json"]);
@@ -1845,7 +1856,8 @@ mod simulate_tests {
     #[test]
     fn simulate_json_totals_match_input() {
         // 3 plain commands: 1 safe, 1 dangerous, 1 safe
-        let content = "git status\ndocker system prune -a --volumes\necho hello\n";
+        // Use git command since core.git is always enabled
+        let content = "git status\ngit reset --hard HEAD~1\necho hello\n";
         let file = create_temp_log_file(content);
 
         let output = run_simulate_file(file.path().to_str().unwrap(), &["--format", "json"]);
@@ -1859,13 +1871,14 @@ mod simulate_tests {
         );
         assert!(
             json["totals"]["denied"].as_u64().unwrap() >= 1,
-            "should have at least 1 denied (docker system prune)"
+            "should have at least 1 denied (git reset --hard)"
         );
     }
 
     #[test]
     fn simulate_pretty_format_has_sections() {
-        let content = "git status\ndocker system prune -a\n";
+        // Use git command since core.git is always enabled
+        let content = "git status\ngit reset --hard\n";
         let file = create_temp_log_file(content);
 
         let output = run_simulate_file(file.path().to_str().unwrap(), &["--format", "pretty"]);
@@ -1893,7 +1906,8 @@ mod simulate_tests {
     #[test]
     fn simulate_rules_sorted_by_count_desc() {
         // Create input with multiple denies of different rules
-        let content = "docker system prune\ndocker system prune -a\ndocker system prune -af\nkubectl delete namespace foo\n";
+        // Use git commands since core.git is always enabled
+        let content = "git reset --hard\ngit reset --hard HEAD~1\ngit reset --hard origin/main\ngit push --force\n";
         let file = create_temp_log_file(content);
 
         let output = run_simulate_file(file.path().to_str().unwrap(), &["--format", "json"]);
@@ -1915,7 +1929,8 @@ mod simulate_tests {
 
     #[test]
     fn simulate_exemplars_included_in_rules() {
-        let content = "docker system prune -a\n";
+        // Use git command since core.git is always enabled
+        let content = "git reset --hard\n";
         let file = create_temp_log_file(content);
 
         let output = run_simulate_file(file.path().to_str().unwrap(), &["--format", "json"]);
@@ -2010,7 +2025,8 @@ mod simulate_tests {
     #[test]
     fn simulate_top_rules_limit() {
         // Create many different blocked commands
-        let content = "docker system prune\nkubectl delete ns foo\ngit push --force\n";
+        // Use git commands since core.git is always enabled
+        let content = "git reset --hard\ngit clean -fdx\ngit push --force\n";
         let file = create_temp_log_file(content);
 
         let output = run_simulate_file(
@@ -2074,7 +2090,8 @@ echo hello
 
     #[test]
     fn simulate_output_is_deterministic() {
-        let content = "docker system prune\ngit push --force origin main\nkubectl delete ns prod\n";
+        // Use git commands since core.git is always enabled
+        let content = "git reset --hard\ngit push --force origin main\ngit clean -fdx\n";
         let file = create_temp_log_file(content);
         let path = file.path().to_str().unwrap();
 
