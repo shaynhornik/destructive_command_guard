@@ -232,7 +232,10 @@ const SECRET_PATTERNS: &[(&str, &str)] = &[
         r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
         "[PRIVATE_KEY]",
     ),
-    (r"-----BEGIN PGP PRIVATE KEY BLOCK-----", "[PGP_PRIVATE_KEY]"),
+    (
+        r"-----BEGIN PGP PRIVATE KEY BLOCK-----",
+        "[PGP_PRIVATE_KEY]",
+    ),
     // JWT (header.payload.signature format)
     (
         r"eyJ[a-zA-Z0-9_\-]*\.eyJ[a-zA-Z0-9_\-]*\.[a-zA-Z0-9_\-]*",
@@ -256,9 +259,7 @@ static SECRET_REGEXES: std::sync::LazyLock<Vec<(fancy_regex::Regex, &'static str
         SECRET_PATTERNS
             .iter()
             .filter_map(|(pattern, label)| {
-                fancy_regex::Regex::new(pattern)
-                    .ok()
-                    .map(|re| (re, *label))
+                fancy_regex::Regex::new(pattern).ok().map(|re| (re, *label))
             })
             .collect()
     });
@@ -314,10 +315,12 @@ mod tests {
 
     #[test]
     fn test_openai_key_redaction() {
-        let input =
-            "export OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz123456789012345678";
+        let input = "export OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz123456789012345678";
         let redacted = redact_secrets(input);
-        assert!(!redacted.contains("sk-proj"), "OpenAI key leaked: {redacted}");
+        assert!(
+            !redacted.contains("sk-proj"),
+            "OpenAI key leaked: {redacted}"
+        );
         assert!(
             redacted.contains("[OPENAI_KEY]"),
             "Missing label: {redacted}"
@@ -341,7 +344,10 @@ mod tests {
     #[test]
     fn test_database_uri_redaction() {
         let cases = vec![
-            ("postgres://user:password123@localhost:5432/db", "password123"),
+            (
+                "postgres://user:password123@localhost:5432/db",
+                "password123",
+            ),
             ("mysql://root:secret@db.example.com/mydb", "secret"),
             (
                 "mongodb+srv://admin:p4ssw0rd@cluster.mongodb.net/test",
@@ -360,7 +366,8 @@ mod tests {
 
     #[test]
     fn test_github_pat_redaction() {
-        let input = "git clone https://ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@github.com/org/repo";
+        let input =
+            "git clone https://ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@github.com/org/repo";
         let redacted = redact_secrets(input);
         assert!(!redacted.contains("ghp_"), "GitHub PAT leaked: {redacted}");
         assert!(
@@ -415,7 +422,8 @@ MIIEpAIBAAKCAQEA...
 
     #[test]
     fn test_redaction_mode_none() {
-        let input = "curl -H 'x-api-key: sk-ant-api03-secret1234567890123' https://api.anthropic.com";
+        let input =
+            "curl -H 'x-api-key: sk-ant-api03-secret1234567890123' https://api.anthropic.com";
         let redacted = redact_for_telemetry(input, TelemetryRedactionMode::None);
         assert_eq!(input, redacted, "None mode should not redact");
     }
@@ -429,7 +437,8 @@ MIIEpAIBAAKCAQEA...
 
     #[test]
     fn test_redaction_mode_pattern() {
-        let input = "curl -H 'x-api-key: sk-ant-api03-secret1234567890123' https://api.anthropic.com";
+        let input =
+            "curl -H 'x-api-key: sk-ant-api03-secret1234567890123' https://api.anthropic.com";
         let redacted = redact_for_telemetry(input, TelemetryRedactionMode::Pattern);
         assert!(
             !redacted.contains("sk-ant-api"),
@@ -445,7 +454,10 @@ MIIEpAIBAAKCAQEA...
     fn test_slack_token_redaction() {
         let input = "export SLACK_BOT_TOKEN=xoxb-1234567890-abcdefghij";
         let redacted = redact_secrets(input);
-        assert!(!redacted.contains("xoxb-"), "Slack token leaked: {redacted}");
+        assert!(
+            !redacted.contains("xoxb-"),
+            "Slack token leaked: {redacted}"
+        );
         assert!(
             redacted.contains("[SLACK_TOKEN]"),
             "Missing label: {redacted}"
@@ -456,7 +468,10 @@ MIIEpAIBAAKCAQEA...
     fn test_google_api_key_redaction() {
         let input = "curl 'https://maps.googleapis.com/maps/api/geocode/json?key=AIzaSyA1234567890123456789012345678901234'";
         let redacted = redact_secrets(input);
-        assert!(!redacted.contains("AIza"), "Google API key leaked: {redacted}");
+        assert!(
+            !redacted.contains("AIza"),
+            "Google API key leaked: {redacted}"
+        );
         assert!(
             redacted.contains("[GOOGLE_API_KEY]"),
             "Missing label: {redacted}"
@@ -471,10 +486,7 @@ MIIEpAIBAAKCAQEA...
             !redacted.contains("supersecret"),
             "Password leaked: {redacted}"
         );
-        assert!(
-            redacted.contains("[PASSWORD]"),
-            "Missing label: {redacted}"
-        );
+        assert!(redacted.contains("[PASSWORD]"), "Missing label: {redacted}");
     }
 
     #[test]

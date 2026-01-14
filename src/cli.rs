@@ -7904,7 +7904,12 @@ exclude = ["target/**"]
     fn test_cli_parse_telemetry_recent() {
         let cli = Cli::parse_from(["dcg", "telemetry", "recent", "50"]);
         if let Some(Command::Telemetry { action }) = cli.command {
-            if let Some(TelemetryAction::Recent { limit, offset, json }) = action {
+            if let Some(TelemetryAction::Recent {
+                limit,
+                offset,
+                json,
+            }) = action
+            {
                 assert_eq!(limit, 50);
                 assert_eq!(offset, 0);
                 assert!(!json);
@@ -7920,7 +7925,12 @@ exclude = ["target/**"]
     fn test_cli_parse_telemetry_recent_with_pagination() {
         let cli = Cli::parse_from(["dcg", "telemetry", "recent", "--offset", "10", "--json"]);
         if let Some(Command::Telemetry { action }) = cli.command {
-            if let Some(TelemetryAction::Recent { limit, offset, json }) = action {
+            if let Some(TelemetryAction::Recent {
+                limit,
+                offset,
+                json,
+            }) = action
+            {
                 assert_eq!(limit, 20); // default
                 assert_eq!(offset, 10);
                 assert!(json);
@@ -7936,7 +7946,12 @@ exclude = ["target/**"]
     fn test_cli_parse_telemetry_blocks() {
         let cli = Cli::parse_from(["dcg", "telemetry", "blocks", "100", "--json"]);
         if let Some(Command::Telemetry { action }) = cli.command {
-            if let Some(TelemetryAction::Blocks { limit, offset, json }) = action {
+            if let Some(TelemetryAction::Blocks {
+                limit,
+                offset,
+                json,
+            }) = action
+            {
                 assert_eq!(limit, 100);
                 assert_eq!(offset, 0);
                 assert!(json);
@@ -7952,7 +7967,13 @@ exclude = ["target/**"]
     fn test_cli_parse_telemetry_search() {
         let cli = Cli::parse_from(["dcg", "telemetry", "search", "git reset"]);
         if let Some(Command::Telemetry { action }) = cli.command {
-            if let Some(TelemetryAction::Search { pattern, limit, offset: _, json }) = action {
+            if let Some(TelemetryAction::Search {
+                pattern,
+                limit,
+                offset: _,
+                json,
+            }) = action
+            {
                 assert_eq!(pattern, "git reset");
                 assert_eq!(limit, 50); // default
                 assert!(!json);
@@ -7966,9 +7987,22 @@ exclude = ["target/**"]
 
     #[test]
     fn test_cli_parse_telemetry_project() {
-        let cli = Cli::parse_from(["dcg", "telemetry", "project", "/path/to/project", "--limit", "10"]);
+        let cli = Cli::parse_from([
+            "dcg",
+            "telemetry",
+            "project",
+            "/path/to/project",
+            "--limit",
+            "10",
+        ]);
         if let Some(Command::Telemetry { action }) = cli.command {
-            if let Some(TelemetryAction::Project { path, limit, offset: _, json: _ }) = action {
+            if let Some(TelemetryAction::Project {
+                path,
+                limit,
+                offset: _,
+                json: _,
+            }) = action
+            {
                 assert_eq!(path, "/path/to/project");
                 assert_eq!(limit, 10);
             } else {
