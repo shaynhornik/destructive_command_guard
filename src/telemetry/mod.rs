@@ -226,7 +226,8 @@ const SECRET_PATTERNS: &[(&str, &str)] = &[
     (r"(?i)postgres://[^:]+:[^@]+@", "[POSTGRES_URI]"),
     (r"(?i)mysql://[^:]+:[^@]+@", "[MYSQL_URI]"),
     (r"(?i)mongodb(?:\+srv)?://[^:]+:[^@]+@", "[MONGO_URI]"),
-    (r"(?i)redis://:[^@]+@", "[REDIS_URI]"),
+    (r"(?i)redis://[^:]+:[^@]+@", "[REDIS_URI]"), // user:password format
+    (r"(?i)redis://:[^@]+@", "[REDIS_URI]"),      // password-only format
     // Private Keys
     (
         r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
@@ -353,6 +354,13 @@ mod tests {
                 "mongodb+srv://admin:p4ssw0rd@cluster.mongodb.net/test",
                 "p4ssw0rd",
             ),
+            // Redis with user:password format
+            (
+                "redis://default:myredispass@redis.example.com:6379",
+                "myredispass",
+            ),
+            // Redis with password-only format
+            ("redis://:secretpass@localhost:6379", "secretpass"),
         ];
 
         for (uri, secret) in cases {
