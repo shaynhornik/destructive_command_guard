@@ -586,7 +586,28 @@ impl ContextClassifier {
             return env_split_string_context(command, flag_start);
         }
 
-        // For standard interpreters (python -c, bash -c), scan backwards skipping flags
+        let is_inline_interpreter = |candidate: &str| {
+            let base_name = candidate.rsplit('/').next().unwrap_or(candidate);
+            self.inline_code_commands.iter().any(|&known| {
+                if base_name == known {
+                    return true;
+                }
+                if let Some(suffix) = base_name.strip_prefix(known) {
+                    return !suffix.is_empty()
+                        && suffix.chars().all(|c| c.is_ascii_digit() || c == '.');
+                }
+                false
+            })
+        };
+
+        if let Some(cmd_word) = command_word_before_flag(command, flag_start) {
+            if is_inline_interpreter(cmd_word) {
+                return true;
+            }
+            return false;
+        }
+
+        // Fallback: scan backwards for interpreters if we can't identify the command word.
         let before = &command[..flag_start];
 
         // Limit search to reasonable lookback (e.g. 20 tokens or start of segment)
@@ -620,29 +641,8 @@ impl ContextClassifier {
                 token
             };
 
-            // Found a potential command word
-            let base_name = token_unquoted.rsplit('/').next().unwrap_or(token_unquoted);
-
-            // Skip wrappers that might precede the interpreter
-            if matches!(base_name, "sudo" | "time" | "nohup" | "env" | "command") {
-                continue;
-            }
-
-            // Check for known interpreter, allowing for version suffixes
-            // e.g. "python3.11" matches "python", "node18" matches "node"
-            let is_interpreter = self.inline_code_commands.iter().any(|&known| {
-                if base_name == known {
-                    return true;
-                }
-                if let Some(suffix) = base_name.strip_prefix(known) {
-                    // Suffix must be non-empty and consist only of digits/dots
-                    return !suffix.is_empty()
-                        && suffix.chars().all(|c| c.is_ascii_digit() || c == '.');
-                }
-                false
-            });
-
-            if is_interpreter {
+            // Found a potential command word.
+            if is_inline_interpreter(token_unquoted) {
                 return true;
             }
 
@@ -2033,6 +2033,70 @@ fn segment_start_before_flag(command: &str, flag_start: usize) -> usize {
 }
 
 #[must_use]
+fn command_word_before_flag<'a>(command: &'a str, flag_start: usize) -> Option<&'a str> {
+    let tokens = tokenize_command(command);
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let mut segment_cmd: Option<&'a str> = None;
+    let mut wrapper = WrapperState::None;
+
+    for token in tokens {
+        if token.byte_range.start >= flag_start {
+            break;
+        }
+
+        match token.kind {
+            SanitizeTokenKind::Separator => {
+                segment_cmd = None;
+                wrapper = WrapperState::None;
+                continue;
+            }
+            SanitizeTokenKind::Comment => continue,
+            SanitizeTokenKind::Word => {}
+        }
+
+        let token_text = token.text(command)?;
+
+        if token_text == "\\\n" || token_text == "\\\r\n" {
+            continue;
+        }
+
+        if segment_cmd.is_none() {
+            let token_text = strip_outer_quotes(token_text);
+            if let Some(next_wrapper) = WrapperState::from_command_word(token_text) {
+                wrapper = next_wrapper;
+                continue;
+            }
+            let (next_wrapper, skip) = wrapper.consume_token(token_text);
+            wrapper = next_wrapper;
+            if skip {
+                continue;
+            }
+            if is_env_assignment(token_text) {
+                continue;
+            }
+
+            segment_cmd = Some(token_text);
+        }
+    }
+
+    segment_cmd
+}
+
+#[inline]
+#[must_use]
+fn strip_outer_quotes(token: &str) -> &str {
+    if (token.starts_with('"') && token.ends_with('"'))
+        || (token.starts_with('\'') && token.ends_with('\''))
+    {
+        return token.get(1..token.len() - 1).unwrap_or(token);
+    }
+    token
+}
+
+#[must_use]
 fn merge_ranges(ranges: &[Range<usize>]) -> SmallVec<[Range<usize>; 8]> {
     let mut merged: SmallVec<[Range<usize>; 8]> = SmallVec::new();
     for range in ranges {
@@ -2277,6 +2341,21 @@ mod tests {
         assert!(
             inline_span.is_some(),
             "Should detect inline code after python -c"
+        );
+    }
+
+    #[test]
+    fn test_echo_python_c_not_inline_code() {
+        let cmd = r#"echo python -c "import os; os.system('rm -rf /')""#;
+        let spans = classify_command(cmd);
+
+        let inline_span = spans
+            .spans()
+            .iter()
+            .find(|s| s.kind == SpanKind::InlineCode);
+        assert!(
+            inline_span.is_none(),
+            "Echoing interpreter flags should not be treated as inline code"
         );
     }
 
