@@ -848,8 +848,7 @@ static SAFE_COMMANDS_MATCHER: Lazy<AhoCorasick> = Lazy::new(|| {
     // Collect all unique command names from the registry plus special built-ins
     let commands: &[&str] = &[
         // all_args_data commands
-        "echo", "printf",
-        // Commands from flag_data_pairs
+        "echo", "printf", // Commands from flag_data_pairs
         "git", "bd", "grep", "rg", "ag", "ack", "gh", "curl", "jq", "docker", "kubectl", "xargs",
         "cargo", "npm",
         // Special built-in: `command -v/-V` queries mask their arguments
