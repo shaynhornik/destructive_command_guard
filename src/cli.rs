@@ -1704,6 +1704,7 @@ fn handle_simulate_command(
         max_lines,
         max_bytes,
         max_command_bytes: Some(max_command_bytes),
+        max_line_bytes: Some(1024 * 1024),
     };
 
     // Open input (file or stdin)

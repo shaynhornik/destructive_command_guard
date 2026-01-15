@@ -87,7 +87,7 @@ const HEREDOC_TRIGGER_PATTERNS: [&str; 12] = [
     // Piped execution to interpreters (versioned)
     r"\|\s*(python(?:[0-9]+(?:\.[0-9]+)*)?|ruby(?:[0-9]+(?:\.[0-9]+)*)?|perl(?:[0-9]+(?:\.[0-9]+)*)?|node(js)?(?:[0-9]+(?:\.[0-9]+)*)?|php(?:[0-9]+(?:\.[0-9]+)*)?|lua(?:[0-9]+(?:\.[0-9]+)*)?|sh|bash)(?:\.exe)?\b",
     // Piped to xargs (can execute arbitrary commands)
-    r"\|\s*xargs(?:\.exe)?\s",
+    r"\|\s*xargs(?:\.exe)?\b",
     // exec/eval in various contexts
     r#"\beval\s+['"]"#,
     r#"\bexec\s+['"]"#,
