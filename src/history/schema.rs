@@ -209,7 +209,7 @@ impl HistoryDb {
     /// Open or create the history database at the default path.
     ///
     /// The default path is `~/.config/dcg/history.db` unless overridden
-    /// by the `DCG_TELEMETRY_DB` environment variable.
+    /// by the `DCG_HISTORY_DB` environment variable.
     ///
     /// # Errors
     ///

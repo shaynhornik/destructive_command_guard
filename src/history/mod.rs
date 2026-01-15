@@ -48,10 +48,10 @@ pub use schema::{
 };
 
 /// Environment variable to override the history database path.
-pub const ENV_HISTORY_DB_PATH: &str = "DCG_TELEMETRY_DB";
+pub const ENV_HISTORY_DB_PATH: &str = "DCG_HISTORY_DB";
 
 /// Environment variable to disable history collection entirely.
-pub const ENV_HISTORY_DISABLED: &str = "DCG_TELEMETRY_DISABLED";
+pub const ENV_HISTORY_DISABLED: &str = "DCG_HISTORY_DISABLED";
 
 enum HistoryMessage {
     Entry(Box<CommandEntry>),
