@@ -613,6 +613,7 @@ dependencies = [
  "ctrlc",
  "dirs",
  "fancy-regex",
+ "flate2",
  "fs2",
  "hmac",
  "libc",
