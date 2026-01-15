@@ -20,8 +20,6 @@
 //! // The 'git commit -m' part is classified as Executed
 //! ```
 
-use aho_corasick::AhoCorasick;
-use once_cell::sync::Lazy;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::ops::Range;
@@ -839,24 +837,6 @@ pub static SAFE_STRING_REGISTRY: SafeStringRegistry = SafeStringRegistry {
     ],
 };
 
-/// Pre-computed Aho-Corasick automaton for quick-reject in sanitization.
-///
-/// If none of these command names appear in the input, we can skip tokenization
-/// entirely since no masking would occur. This is a significant optimization for
-/// commands like heredocs that don't invoke any of the safe-registry commands.
-static SAFE_COMMANDS_MATCHER: Lazy<AhoCorasick> = Lazy::new(|| {
-    // Collect all unique command names from the registry plus special built-ins
-    let commands: &[&str] = &[
-        // all_args_data commands
-        "echo", "printf", // Commands from flag_data_pairs
-        "git", "bd", "grep", "rg", "ag", "ack", "gh", "curl", "jq", "docker", "kubectl", "xargs",
-        "cargo", "npm",
-        // Special built-in: `command -v/-V` queries mask their arguments
-        "command",
-    ];
-    AhoCorasick::new(commands).expect("static patterns should compile")
-});
-
 impl SafeStringRegistry {
     /// Check if a command has ALL its arguments as data.
     ///
@@ -982,13 +962,6 @@ struct PendingSafeFlag<'a> {
 #[must_use]
 #[allow(clippy::too_many_lines)] // Single-pass masking logic; refactor only if it becomes unreadable
 pub fn sanitize_for_pattern_matching(command: &str) -> Cow<'_, str> {
-    // Quick-reject: if no safe-registry commands appear in the input, no masking
-    // is possible. Skip expensive tokenization entirely. This is a significant
-    // optimization for heredocs and other large inputs that don't use these commands.
-    if !SAFE_COMMANDS_MATCHER.is_match(command) {
-        return Cow::Borrowed(command);
-    }
-
     let tokens = tokenize_command(command);
     if tokens.is_empty() {
         return Cow::Borrowed(command);
