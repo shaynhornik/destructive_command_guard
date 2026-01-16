@@ -1288,7 +1288,8 @@ fn test_command(
     // Print command with highlighting if available
     if let Some((span, label)) = &highlight_info {
         let highlight_span = HighlightSpan::with_label(span.start, span.end, label.clone());
-        let highlighted = format_highlighted_command(command, &highlight_span, use_color, term_width);
+        let highlighted =
+            format_highlighted_command(command, &highlight_span, use_color, term_width);
         println!("Command: {}", highlighted.command_line);
         println!("         {}", highlighted.caret_line);
         if let Some(ref label_line) = highlighted.label_line {

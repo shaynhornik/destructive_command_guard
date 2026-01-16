@@ -2749,9 +2749,7 @@ mod explanation_output_tests {
             serde_json::from_str(&stdout).expect("explain JSON should be valid");
 
         // Get explanation from match object
-        let explanation = json["match"]["explanation"]
-            .as_str()
-            .unwrap_or_default();
+        let explanation = json["match"]["explanation"].as_str().unwrap_or_default();
 
         // Explanation should be non-empty and contain relevant info
         assert!(
@@ -2884,22 +2882,13 @@ mod explanation_output_tests {
         let has_command = stderr.contains("Command:");
         let has_suggestions = stderr.contains("💡") || stderr.contains("Safer");
 
-        assert!(
-            has_rule,
-            "should show rule info\nstderr:\n{stderr}"
-        );
-        assert!(
-            has_reason,
-            "should show reason\nstderr:\n{stderr}"
-        );
+        assert!(has_rule, "should show rule info\nstderr:\n{stderr}");
+        assert!(has_reason, "should show reason\nstderr:\n{stderr}");
         assert!(
             has_explanation,
             "should show explanation\nstderr:\n{stderr}"
         );
-        assert!(
-            has_command,
-            "should show command\nstderr:\n{stderr}"
-        );
+        assert!(has_command, "should show command\nstderr:\n{stderr}");
         // Suggestions might not always be present
         let _ = has_suggestions;
     }
@@ -2938,10 +2927,7 @@ mod explanation_output_tests {
     #[test]
     fn explain_json_all_blocked_have_explanation() {
         // All blocked commands should have an explanation in JSON output
-        let commands = [
-            "git reset --hard",
-            "git clean -fdx",
-        ];
+        let commands = ["git reset --hard", "git clean -fdx"];
 
         for cmd in commands {
             let output = run_dcg(&["explain", "--format", "json", cmd]);

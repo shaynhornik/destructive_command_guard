@@ -14,7 +14,7 @@
 //! - Avoids broad `.*` patterns that could allow destructive variants
 
 use crate::normalize::strip_wrapper_prefixes;
-use regex::{escape as regex_escape, Regex};
+use regex::{Regex, escape as regex_escape};
 use std::collections::{HashMap, HashSet};
 
 /// Default similarity threshold for clustering (Jaccard over token sets).
@@ -728,10 +728,12 @@ mod tests {
         let clusters = cluster_denied_commands(&input, 2);
         assert_eq!(clusters.len(), 1);
         // Both commands should cluster together after stripping sudo
-        assert!(clusters[0]
-            .normalized
-            .iter()
-            .all(|n| !n.starts_with("sudo")));
+        assert!(
+            clusters[0]
+                .normalized
+                .iter()
+                .all(|n| !n.starts_with("sudo"))
+        );
     }
 
     #[test]
@@ -1009,9 +1011,7 @@ mod tests {
     #[test]
     fn generate_pattern_respects_max_alternation_count() {
         // Create more variants than MAX_ALTERNATION_COUNT
-        let commands: Vec<String> = (0..15)
-            .map(|i| format!("cmd arg{i}"))
-            .collect();
+        let commands: Vec<String> = (0..15).map(|i| format!("cmd arg{i}")).collect();
         let pattern = generate_pattern_from_cluster(&commands);
 
         // Should still match all commands
