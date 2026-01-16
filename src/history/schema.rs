@@ -147,7 +147,7 @@ pub struct CommandEntry {
     /// Pattern name that matched (if any).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pattern_name: Option<String>,
-    /// Stable rule identifier: pack_id:pattern_name
+    /// Stable rule identifier: `pack_id:pattern_name`
     /// Present only for denied commands that matched a pattern.
     /// Format: "core.git:reset-hard", "core.filesystem:rm-rf-root"
     #[serde(skip_serializing_if = "Option::is_none")]
