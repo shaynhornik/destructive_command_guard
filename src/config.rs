@@ -42,6 +42,9 @@ pub struct Config {
     /// General settings.
     pub general: GeneralConfig,
 
+    /// Output display settings.
+    pub output: OutputConfig,
+
     /// Pack configuration.
     pub packs: PacksConfig,
 
@@ -87,6 +90,7 @@ pub struct Config {
 #[derive(Debug, Clone, Default, Deserialize)]
 struct ConfigLayer {
     general: Option<GeneralConfigLayer>,
+    output: Option<OutputConfigLayer>,
     packs: Option<PacksConfig>,
     policy: Option<PolicyConfig>,
     overrides: Option<OverridesConfig>,
@@ -105,6 +109,12 @@ struct GeneralConfigLayer {
     max_hook_input_bytes: Option<usize>,
     max_command_bytes: Option<usize>,
     max_findings_per_command: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+struct OutputConfigLayer {
+    highlight_enabled: Option<bool>,
+    explanations_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -771,6 +781,46 @@ impl GeneralConfig {
     pub fn max_findings_per_command(&self) -> usize {
         self.max_findings_per_command
             .unwrap_or(DEFAULT_MAX_FINDINGS_PER_COMMAND)
+    }
+}
+
+/// Output display configuration.
+///
+/// Controls optional output enhancements like span highlighting and explanations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OutputConfig {
+    /// Enable span highlighting in denial output.
+    /// When enabled, shows caret-style markers under the matched portion.
+    /// Default: true
+    pub highlight_enabled: Option<bool>,
+
+    /// Enable explanations in denial output.
+    /// When enabled, shows detailed explanations for why patterns are dangerous.
+    /// Default: true
+    pub explanations_enabled: Option<bool>,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            highlight_enabled: None,
+            explanations_enabled: None,
+        }
+    }
+}
+
+impl OutputConfig {
+    /// Check if span highlighting is enabled (default: true).
+    #[must_use]
+    pub fn highlight_enabled(&self) -> bool {
+        self.highlight_enabled.unwrap_or(true)
+    }
+
+    /// Check if explanations are enabled (default: true).
+    #[must_use]
+    pub fn explanations_enabled(&self) -> bool {
+        self.explanations_enabled.unwrap_or(true)
     }
 }
 
@@ -1471,6 +1521,10 @@ impl Config {
             self.merge_general_layer(general);
         }
 
+        if let Some(output) = other.output {
+            self.merge_output_layer(output);
+        }
+
         if let Some(packs) = other.packs {
             self.merge_packs_layer(packs);
         }
@@ -1523,6 +1577,15 @@ impl Config {
         }
         if let Some(max_findings_per_command) = general.max_findings_per_command {
             self.general.max_findings_per_command = Some(max_findings_per_command);
+        }
+    }
+
+    fn merge_output_layer(&mut self, output: OutputConfigLayer) {
+        if let Some(highlight_enabled) = output.highlight_enabled {
+            self.output.highlight_enabled = Some(highlight_enabled);
+        }
+        if let Some(explanations_enabled) = output.explanations_enabled {
+            self.output.explanations_enabled = Some(explanations_enabled);
         }
     }
 
@@ -1830,6 +1893,7 @@ impl Config {
     pub fn generate_default() -> Self {
         Self {
             general: GeneralConfig::default(),
+            output: OutputConfig::default(),
             packs: PacksConfig {
                 enabled: vec![
                     // Core is implicit, but list common ones
@@ -1864,6 +1928,19 @@ color = "auto"
 
 # Verbose output
 verbose = false
+
+#─────────────────────────────────────────────────────────────
+# OUTPUT CONFIGURATION
+#─────────────────────────────────────────────────────────────
+
+[output]
+# Enable span highlighting in denial output.
+# Shows caret-style markers under the matched portion.
+# highlight_enabled = true
+
+# Enable explanations in denial output.
+# Shows detailed explanations for why patterns are dangerous.
+# explanations_enabled = true
 
 #─────────────────────────────────────────────────────────────
 # PACK CONFIGURATION
