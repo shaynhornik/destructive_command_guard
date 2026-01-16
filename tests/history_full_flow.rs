@@ -5,7 +5,7 @@ mod common;
 use chrono::Utc;
 use common::db::TestDb;
 use common::logging::init_test_logging;
-use destructive_command_guard::history::{CommandEntry, Outcome as HistoryOutcome};
+use destructive_command_guard::history::{CommandEntry, Outcome};
 
 #[test]
 fn test_full_history_pipeline() {
@@ -17,7 +17,7 @@ fn test_full_history_pipeline() {
         agent_type: "claude_code".to_string(),
         working_dir: "/test".to_string(),
         command: "git status".to_string(),
-        outcome: HistoryOutcome::Allow,
+        outcome: Outcome::Allow,
         eval_duration_us: 150,
         ..Default::default()
     };
@@ -34,7 +34,7 @@ fn test_full_history_pipeline() {
         .query_row(
             "SELECT command, outcome FROM commands WHERE id = ?1",
             [id],
-            |row: &rusqlite::Row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("query stored command");
 
@@ -47,7 +47,7 @@ fn test_full_history_pipeline() {
         .query_row(
             "SELECT COUNT(*) FROM commands_fts WHERE commands_fts MATCH 'git'",
             [],
-            |row: &rusqlite::Row| row.get(0),
+            |row| row.get(0),
         )
         .expect("fts query");
     assert_eq!(fts_count, 1);

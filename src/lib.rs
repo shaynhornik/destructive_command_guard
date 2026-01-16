@@ -68,7 +68,6 @@ pub mod config;
 pub mod context;
 pub mod evaluator;
 pub mod heredoc;
-#[path = "telemetry/mod.rs"]
 pub mod history;
 pub mod hook;
 pub mod logging;

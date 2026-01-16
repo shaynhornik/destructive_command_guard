@@ -16,9 +16,7 @@ use common::db::TestDb;
 use common::fixtures;
 use common::logging::init_test_logging;
 use destructive_command_guard::config::{HistoryConfig, HistoryRedactionMode};
-use destructive_command_guard::history::{
-    CommandEntry, HistoryDb, HistoryWriter, Outcome as HistoryOutcome,
-};
+use destructive_command_guard::history::{CommandEntry, HistoryDb, HistoryWriter, Outcome};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -35,7 +33,7 @@ fn test_full_history_pipeline() {
         agent_type: "claude_code".to_string(),
         working_dir: "/data/projects/test".to_string(),
         command: "git status".to_string(),
-        outcome: HistoryOutcome::Allow,
+        outcome: Outcome::Allow,
         eval_duration_us: 150,
         ..Default::default()
     };
@@ -428,7 +426,7 @@ fn test_history_writer_logs_allow() {
         agent_type: "claude_code".to_string(),
         working_dir: "/tmp".to_string(),
         command: "git status".to_string(),
-        outcome: HistoryOutcome::Allow,
+        outcome: Outcome::Allow,
         ..Default::default()
     });
     writer.flush_sync();
@@ -456,7 +454,7 @@ fn test_history_writer_respects_disabled() {
         agent_type: "claude_code".to_string(),
         working_dir: "/tmp".to_string(),
         command: "git status".to_string(),
-        outcome: HistoryOutcome::Allow,
+        outcome: Outcome::Allow,
         ..Default::default()
     });
     writer.flush_sync();
@@ -485,7 +483,7 @@ fn test_history_writer_full_redaction() {
         agent_type: "claude_code".to_string(),
         working_dir: "/tmp".to_string(),
         command: "curl -H 'Bearer secret'".to_string(),
-        outcome: HistoryOutcome::Allow,
+        outcome: Outcome::Allow,
         ..Default::default()
     });
     writer.flush_sync();
@@ -518,7 +516,7 @@ fn test_history_writer_logs_deny_with_match_info() {
         agent_type: "claude_code".to_string(),
         working_dir: "/tmp".to_string(),
         command: "git reset --hard".to_string(),
-        outcome: HistoryOutcome::Deny,
+        outcome: Outcome::Deny,
         pack_id: Some("core.git".to_string()),
         pattern_name: Some("reset-hard".to_string()),
         ..Default::default()
@@ -560,7 +558,7 @@ fn test_history_writer_flushes_on_drop() {
             agent_type: "claude_code".to_string(),
             working_dir: "/tmp".to_string(),
             command: "git status".to_string(),
-            outcome: HistoryOutcome::Allow,
+            outcome: Outcome::Allow,
             ..Default::default()
         });
     }
@@ -591,7 +589,7 @@ fn test_history_writer_async_performance() {
             agent_type: "claude_code".to_string(),
             working_dir: "/tmp".to_string(),
             command: format!("command_{i}"),
-            outcome: HistoryOutcome::Allow,
+            outcome: Outcome::Allow,
             ..Default::default()
         });
     }
@@ -604,9 +602,6 @@ fn test_history_writer_async_performance() {
     );
 
     writer.flush_sync();
-    // Drop writer to ensure all writes are committed and WAL is checkpointed
-    // before opening a new reader connection
-    drop(writer);
     let reader = HistoryDb::open(Some(db_path)).expect("open reader");
     assert_eq!(reader.count_commands().unwrap(), 1000);
 }
