@@ -1320,8 +1320,12 @@ impl HistoryDb {
     ///
     /// Returns an error if the rebuild fails.
     pub fn rebuild_fts(&self) -> Result<u64, HistoryError> {
+        // Use a transaction to ensure atomicity - if anything fails, we roll back
+        // to the previous state rather than leaving the database in an inconsistent state
+        let tx = self.conn.unchecked_transaction()?;
+
         // First, drop triggers to prevent interference during rebuild
-        self.conn.execute_batch(
+        tx.execute_batch(
             r"
             DROP TRIGGER IF EXISTS commands_fts_insert;
             DROP TRIGGER IF EXISTS commands_fts_delete;
@@ -1330,9 +1334,9 @@ impl HistoryDb {
         )?;
 
         // Drop and recreate the FTS table
-        self.conn.execute("DROP TABLE IF EXISTS commands_fts", [])?;
+        tx.execute("DROP TABLE IF EXISTS commands_fts", [])?;
 
-        self.conn.execute(
+        tx.execute(
             r"CREATE VIRTUAL TABLE commands_fts USING fts5(
                 command,
                 content='commands',
@@ -1343,18 +1347,17 @@ impl HistoryDb {
 
         // Rebuild the index by inserting all existing commands
         // Using the 'rebuild' command is the most efficient way
-        self.conn.execute(
+        tx.execute(
             "INSERT INTO commands_fts(commands_fts) VALUES('rebuild')",
             [],
         )?;
 
         // Get the count of re-indexed entries
         let fts_count: i64 =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM commands_fts", [], |row| row.get(0))?;
+            tx.query_row("SELECT COUNT(*) FROM commands_fts", [], |row| row.get(0))?;
 
         // Recreate the triggers
-        self.conn.execute_batch(
+        tx.execute_batch(
             r"
             CREATE TRIGGER commands_fts_insert AFTER INSERT ON commands BEGIN
                 INSERT INTO commands_fts(rowid, command) VALUES (new.id, new.command);
@@ -1372,6 +1375,9 @@ impl HistoryDb {
             END;
             ",
         )?;
+
+        // Commit the transaction - only now are all changes visible
+        tx.commit()?;
 
         Ok(u64::try_from(fts_count).unwrap_or(0))
     }
