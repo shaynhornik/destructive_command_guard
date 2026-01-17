@@ -9,9 +9,8 @@ use clap::{Args, Parser, Subcommand};
 use crate::config::Config;
 use crate::evaluator::{
     DEFAULT_WINDOW_WIDTH, EvaluationDecision, MatchSource, evaluate_command_with_pack_order,
-    evaluate_command_with_pack_order_deadline_with_external,
+    evaluate_command_with_pack_order_deadline_at_path,
 };
-use crate::packs::external::ExternalPackLoader;
 use crate::highlight::{HighlightSpan, format_highlighted_command, should_use_color};
 use crate::history::{
     ExportOptions, HistoryDb, HistoryStats, Outcome, SuggestionAction, SuggestionAuditEntry,
@@ -22,9 +21,7 @@ use crate::pending_exceptions::{
     AllowOnceEntry, AllowOnceScopeKind, AllowOnceStore, PendingExceptionRecord,
     PendingExceptionStore,
 };
-use crate::suggest::{
-    AllowlistSuggestion, ConfidenceTier, RiskLevel, generate_allowlist_suggestions,
-};
+use crate::suggest::{CommandCluster, cluster_denied_commands};
 
 /// High-performance Claude Code hook for blocking destructive commands.
 ///
@@ -5903,67 +5900,11 @@ fn self_update(update: UpdateCommand) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 /// Perform update using native Rust self_update crate.
-fn self_update_native(update: &UpdateCommand) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::update::{format_update_result, perform_update};
-
-    let use_color = std::io::IsTerminal::is_terminal(&std::io::stdout());
-
-    // If not forcing, confirm with user
-    if !update.force {
-        // First check if there's an update available
-        use crate::update::check_for_update;
-        match check_for_update(false) {
-            Ok(result) => {
-                if !result.update_available {
-                    if use_color {
-                        println!("\x1b[32m✓\x1b[0m Already running the latest version ({})", result.current_version);
-                    } else {
-                        println!("Already running the latest version ({})", result.current_version);
-                    }
-                    return Ok(());
-                }
-
-                // Show what's available and prompt for confirmation
-                if use_color {
-                    println!("\x1b[1mUpdate available:\x1b[0m {} → {}", result.current_version, result.latest_version);
-                } else {
-                    println!("Update available: {} -> {}", result.current_version, result.latest_version);
-                }
-
-                // Interactive confirmation
-                if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-                    print!("Proceed with update? [y/N] ");
-                    use std::io::Write;
-                    std::io::stdout().flush()?;
-
-                    let mut input = String::new();
-                    std::io::stdin().read_line(&mut input)?;
-                    let response = input.trim().to_lowercase();
-                    if response != "y" && response != "yes" {
-                        println!("Update cancelled.");
-                        return Ok(());
-                    }
-                } else {
-                    // Non-interactive: require --force
-                    return Err("Non-interactive mode requires --force flag".into());
-                }
-            }
-            Err(e) => {
-                return Err(format!("Failed to check for updates: {e}").into());
-            }
-        }
-    }
-
-    // Perform the update
-    eprintln!("Downloading and installing update...");
-
-    match perform_update(update.force, update.version.as_deref()) {
-        Ok(result) => {
-            print!("{}", format_update_result(&result, use_color));
-            Ok(())
-        }
-        Err(e) => Err(format!("Update failed: {e}").into()),
-    }
+///
+/// Note: Native update is not yet implemented. Use installer flags instead:
+/// `dcg update --system` or `dcg update --from-source`
+fn self_update_native(_update: &UpdateCommand) -> Result<(), Box<dyn std::error::Error>> {
+    Err("Native update not yet implemented. Use `dcg update --system` to update via installer, or `dcg update --check` to check for updates.".into())
 }
 
 /// Check for updates and display the result.
