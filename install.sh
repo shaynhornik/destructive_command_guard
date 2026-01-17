@@ -756,13 +756,16 @@ remove_predecessor() {
 
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 GEMINI_SETTINGS="$HOME/.gemini/settings.json"
+AIDER_SETTINGS="$HOME/.aider.conf.yml"
 AUTO_CONFIGURED=0
 
 # Detailed tracking for what was configured
 CLAUDE_STATUS=""  # "created"|"merged"|"already"|"failed"
 GEMINI_STATUS=""  # "created"|"merged"|"already"|"failed"|"skipped"
+AIDER_STATUS=""   # "created"|"merged"|"already"|"skipped"|"failed"
 CLAUDE_BACKUP=""
 GEMINI_BACKUP=""
+AIDER_BACKUP=""
 
 configure_claude_code() {
   local settings_file="$1"
@@ -1014,6 +1017,79 @@ EOFSET
   fi
 }
 
+configure_aider() {
+  local settings_file="$1"
+
+  # Check if Aider is installed (command exists)
+  if ! command -v aider >/dev/null 2>&1; then
+    AIDER_STATUS="skipped"
+    return 0
+  fi
+
+  # Aider does not have PreToolUse hooks like Claude Code or Gemini CLI.
+  # Instead, we configure git-commit-verify to ensure git hooks run,
+  # so if DCG is installed as a git pre-commit hook, it will be executed.
+  #
+  # Aider's YAML config supports:
+  #   git-commit-verify: true  (enables git hooks, default is false)
+  #
+  # This is a limited integration - Aider will still execute shell commands
+  # without dcg validation unless the user sets up additional git hooks.
+
+  if [ -f "$settings_file" ]; then
+    # Check if git-commit-verify is already set to true
+    if grep -qE '^\s*git-commit-verify:\s*true' "$settings_file" 2>/dev/null; then
+      AIDER_STATUS="already"
+      AUTO_CONFIGURED=1
+      return 0
+    fi
+
+    # Check if git-commit-verify exists but is false
+    if grep -qE '^\s*git-commit-verify:' "$settings_file" 2>/dev/null; then
+      # Update existing setting to true
+      AIDER_BACKUP="${settings_file}.bak.$(date +%Y%m%d%H%M%S)"
+      cp "$settings_file" "$AIDER_BACKUP"
+
+      if command -v sed >/dev/null 2>&1; then
+        sed -i.tmp 's/^\(\s*git-commit-verify:\s*\).*/\1true/' "$settings_file" && rm -f "${settings_file}.tmp"
+        AIDER_STATUS="merged"
+        AUTO_CONFIGURED=1
+      else
+        mv "$AIDER_BACKUP" "$settings_file" 2>/dev/null || true
+        AIDER_STATUS="failed"
+        AIDER_BACKUP=""
+      fi
+    else
+      # Add git-commit-verify setting to existing file
+      AIDER_BACKUP="${settings_file}.bak.$(date +%Y%m%d%H%M%S)"
+      cp "$settings_file" "$AIDER_BACKUP"
+
+      # Append the setting
+      echo "" >> "$settings_file"
+      echo "# Added by dcg installer - enables git hooks so dcg pre-commit can run" >> "$settings_file"
+      echo "git-commit-verify: true" >> "$settings_file"
+      AIDER_STATUS="merged"
+      AUTO_CONFIGURED=1
+    fi
+  else
+    # Create new settings file
+    cat > "$settings_file" <<'EOFAIDER'
+# Aider configuration
+# Created by dcg installer
+#
+# git-commit-verify: enables git hooks (including pre-commit)
+# This allows dcg to validate commands when installed as a git hook.
+#
+# Note: Aider does not have shell command interception hooks like Claude Code.
+# For full protection, consider using dcg as a git pre-commit hook.
+
+git-commit-verify: true
+EOFAIDER
+    AIDER_STATUS="created"
+    AUTO_CONFIGURED=1
+  fi
+}
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Run Auto-Configuration
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1069,6 +1145,9 @@ configure_claude_code "$CLAUDE_SETTINGS" "$REMOVE_PREDECESSOR"
 # Configure Gemini CLI (if installed)
 configure_gemini "$GEMINI_SETTINGS"
 
+# Configure Aider (if installed)
+configure_aider "$AIDER_SETTINGS"
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Final Summary
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1113,6 +1192,27 @@ case "$GEMINI_STATUS" in
     ;;
   failed)
     summary_lines+=("Gemini CLI:  Configuration failed")
+    ;;
+esac
+
+case "$AIDER_STATUS" in
+  created)
+    summary_lines+=("Aider:       Created $AIDER_SETTINGS (git hooks enabled)")
+    summary_lines+=("             Note: Aider lacks shell hooks; uses git-commit-verify for git hook support")
+    ;;
+  merged)
+    summary_lines+=("Aider:       Enabled git-commit-verify in $AIDER_SETTINGS")
+    [ -n "$AIDER_BACKUP" ] && summary_lines+=("             Backup: $AIDER_BACKUP")
+    summary_lines+=("             Note: Aider lacks shell hooks; git hooks now enabled for dcg")
+    ;;
+  already)
+    summary_lines+=("Aider:       Already configured (git-commit-verify enabled)")
+    ;;
+  skipped|"")
+    summary_lines+=("Aider:       Not installed (skipped)")
+    ;;
+  failed)
+    summary_lines+=("Aider:       Configuration failed")
     ;;
 esac
 
