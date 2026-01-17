@@ -479,11 +479,7 @@ impl DcgError {
 
     /// Add a context field to the error.
     #[must_use]
-    pub fn add_context(
-        mut self,
-        key: impl Into<String>,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
+    pub fn add_context(mut self, key: impl Into<String>, value: impl Into<serde_json::Value>) -> Self {
         self.context.insert(key.into(), value.into());
         self
     }
@@ -765,11 +761,7 @@ mod tests {
         ];
 
         for code in codes {
-            assert!(
-                !code.description().is_empty(),
-                "Code {:?} has empty description",
-                code
-            );
+            assert!(!code.description().is_empty(), "Code {:?} has empty description", code);
         }
     }
 }

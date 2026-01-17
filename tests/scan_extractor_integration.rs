@@ -44,7 +44,12 @@ CMD ["./app"]
     )
     .unwrap();
 
-    let output = run_dcg_scan(&["--paths", dir.path().to_str().unwrap(), "--format", "json"]);
+    let output = run_dcg_scan(&[
+        "--paths",
+        dir.path().to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
@@ -52,9 +57,9 @@ CMD ["./app"]
     // Should find the git reset --hard command
     let findings = json["findings"].as_array().unwrap();
     assert!(
-        findings.iter().any(|f| f["file"]
-            .as_str()
-            .map_or(false, |s| s.contains("Dockerfile"))),
+        findings
+            .iter()
+            .any(|f| f["file"].as_str().map_or(false, |s| s.contains("Dockerfile"))),
         "should have findings from Dockerfile"
     );
     assert!(
@@ -81,7 +86,12 @@ RUN apt-get update \
     )
     .unwrap();
 
-    let output = run_dcg_scan(&["--paths", dir.path().to_str().unwrap(), "--format", "json"]);
+    let output = run_dcg_scan(&[
+        "--paths",
+        dir.path().to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
@@ -116,7 +126,12 @@ deploy:
     )
     .unwrap();
 
-    let output = run_dcg_scan(&["--paths", dir.path().to_str().unwrap(), "--format", "json"]);
+    let output = run_dcg_scan(&[
+        "--paths",
+        dir.path().to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
@@ -146,7 +161,12 @@ clean:
     )
     .unwrap();
 
-    let output = run_dcg_scan(&["--paths", dir.path().to_str().unwrap(), "--format", "json"]);
+    let output = run_dcg_scan(&[
+        "--paths",
+        dir.path().to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
@@ -192,7 +212,12 @@ jobs:
     )
     .unwrap();
 
-    let output = run_dcg_scan(&["--paths", dir.path().to_str().unwrap(), "--format", "json"]);
+    let output = run_dcg_scan(&[
+        "--paths",
+        dir.path().to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
@@ -227,7 +252,12 @@ jobs:
     )
     .unwrap();
 
-    let output = run_dcg_scan(&["--paths", dir.path().to_str().unwrap(), "--format", "json"]);
+    let output = run_dcg_scan(&[
+        "--paths",
+        dir.path().to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
@@ -268,7 +298,12 @@ deploy:
     )
     .unwrap();
 
-    let output = run_dcg_scan(&["--paths", dir.path().to_str().unwrap(), "--format", "json"]);
+    let output = run_dcg_scan(&[
+        "--paths",
+        dir.path().to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
@@ -303,7 +338,12 @@ fn scan_package_json_extracts_scripts() {
     )
     .unwrap();
 
-    let output = run_dcg_scan(&["--paths", dir.path().to_str().unwrap(), "--format", "json"]);
+    let output = run_dcg_scan(&[
+        "--paths",
+        dir.path().to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
@@ -333,7 +373,12 @@ fn scan_package_json_ignores_description() {
     )
     .unwrap();
 
-    let output = run_dcg_scan(&["--paths", dir.path().to_str().unwrap(), "--format", "json"]);
+    let output = run_dcg_scan(&[
+        "--paths",
+        dir.path().to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
@@ -365,7 +410,12 @@ fn scan_terraform_extracts_local_exec() {
     )
     .unwrap();
 
-    let output = run_dcg_scan(&["--paths", dir.path().to_str().unwrap(), "--format", "json"]);
+    let output = run_dcg_scan(&[
+        "--paths",
+        dir.path().to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
@@ -397,7 +447,12 @@ fn scan_docker_compose_extracts_command() {
     )
     .unwrap();
 
-    let output = run_dcg_scan(&["--paths", dir.path().to_str().unwrap(), "--format", "json"]);
+    let output = run_dcg_scan(&[
+        "--paths",
+        dir.path().to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -432,7 +487,12 @@ fn scan_docker_compose_ignores_environment() {
     )
     .unwrap();
 
-    let output = run_dcg_scan(&["--paths", dir.path().to_str().unwrap(), "--format", "json"]);
+    let output = run_dcg_scan(&[
+        "--paths",
+        dir.path().to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
@@ -475,7 +535,12 @@ fn scan_multi_format_repository() {
     )
     .unwrap();
 
-    let output = run_dcg_scan(&["--paths", dir.path().to_str().unwrap(), "--format", "json"]);
+    let output = run_dcg_scan(&[
+        "--paths",
+        dir.path().to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
@@ -512,7 +577,12 @@ fn scan_performance_large_dockerfile() {
     std::fs::write(&dockerfile, &content).unwrap();
 
     let start = std::time::Instant::now();
-    let output = run_dcg_scan(&["--paths", dir.path().to_str().unwrap(), "--format", "json"]);
+    let output = run_dcg_scan(&[
+        "--paths",
+        dir.path().to_str().unwrap(),
+        "--format",
+        "json",
+    ]);
     let elapsed = start.elapsed();
 
     assert!(output.status.success() || !output.status.success()); // Either outcome is fine

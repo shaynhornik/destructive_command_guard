@@ -3261,10 +3261,7 @@ fail_on = "nope"
         let finding = finding.unwrap();
         assert_eq!(finding.decision, ScanDecision::Deny);
         assert!(
-            finding
-                .reason
-                .as_ref()
-                .map_or(false, |r| r.contains("git reset --hard")),
+            finding.reason.as_ref().map_or(false, |r| r.contains("git reset --hard")),
             "Reason should mention the blocked command: {:?}",
             finding.reason
         );
@@ -3316,8 +3313,7 @@ fail_on = "nope"
         };
 
         // Step 1: Extract
-        let extracted =
-            extract_docker_compose_from_str("docker-compose.yml", content, &ctx.enabled_keywords);
+        let extracted = extract_docker_compose_from_str("docker-compose.yml", content, &ctx.enabled_keywords);
         eprintln!("Enabled keywords: {:?}", ctx.enabled_keywords);
         eprintln!("Extracted {} commands: {:?}", extracted.len(), extracted);
         assert!(!extracted.is_empty(), "Should extract at least 1 command");
