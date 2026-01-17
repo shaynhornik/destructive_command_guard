@@ -78,7 +78,6 @@ pub mod normalize;
 pub mod packs;
 pub mod pending_exceptions;
 pub mod perf;
-pub mod sarif;
 pub mod scan;
 pub mod simulate;
 pub mod stats;
