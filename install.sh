@@ -18,6 +18,7 @@
 #   --quiet            Suppress non-error output
 #   --no-gum           Disable gum formatting even if available
 #   --no-verify        Skip checksum verification (for testing only)
+#   --offline          Skip network preflight checks
 #
 set -euo pipefail
 umask 022
@@ -40,6 +41,7 @@ SYSTEM=0
 NO_GUM=0
 NO_CHECKSUM=0
 FORCE_INSTALL=0
+OFFLINE="${DCG_OFFLINE:-0}"
 
 # Detect gum for fancy output (https://github.com/charmbracelet/gum)
 HAS_GUM=0
@@ -344,6 +346,119 @@ resolve_version() {
   fi
 }
 
+detect_platform() {
+  OS=$(uname -s | tr 'A-Z' 'a-z')
+  ARCH=$(uname -m)
+  case "$ARCH" in
+    x86_64|amd64) ARCH="x86_64" ;;
+    arm64|aarch64) ARCH="aarch64" ;;
+    *) warn "Unknown arch $ARCH, using as-is" ;;
+  esac
+
+  TARGET=""
+  case "${OS}-${ARCH}" in
+    linux-x86_64) TARGET="x86_64-unknown-linux-gnu" ;;
+    linux-aarch64) TARGET="aarch64-unknown-linux-gnu" ;;
+    darwin-x86_64) TARGET="x86_64-apple-darwin" ;;
+    darwin-aarch64) TARGET="aarch64-apple-darwin" ;;
+    *) :;;
+  esac
+
+  if [ -z "$TARGET" ] && [ "$FROM_SOURCE" -eq 0 ] && [ -z "$ARTIFACT_URL" ]; then
+    warn "No prebuilt artifact for ${OS}/${ARCH}; falling back to build-from-source"
+    FROM_SOURCE=1
+  fi
+}
+
+set_artifact_url() {
+  TAR=""
+  URL=""
+  if [ "$FROM_SOURCE" -eq 0 ]; then
+    if [ -n "$ARTIFACT_URL" ]; then
+      TAR=$(basename "$ARTIFACT_URL")
+      URL="$ARTIFACT_URL"
+    elif [ -n "$TARGET" ]; then
+      TAR="dcg-${TARGET}.tar.xz"
+      URL="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/${TAR}"
+    else
+      warn "No prebuilt artifact for ${OS}/${ARCH}; falling back to build-from-source"
+      FROM_SOURCE=1
+    fi
+  fi
+}
+
+check_disk_space() {
+  local min_kb=10240
+  local path="$DEST"
+  if [ ! -d "$path" ]; then
+    path=$(dirname "$path")
+  fi
+  if command -v df >/dev/null 2>&1; then
+    local avail_kb
+    avail_kb=$(df -Pk "$path" | awk 'NR==2 {print $4}')
+    if [ -n "$avail_kb" ] && [ "$avail_kb" -lt "$min_kb" ]; then
+      err "Insufficient disk space in $path (need at least 10MB)"
+      exit 1
+    fi
+  else
+    warn "df not found; skipping disk space check"
+  fi
+}
+
+check_write_permissions() {
+  if [ ! -d "$DEST" ]; then
+    if ! mkdir -p "$DEST" 2>/dev/null; then
+      err "Cannot create $DEST (insufficient permissions)"
+      err "Try running with sudo or choose a writable --dest"
+      exit 1
+    fi
+  fi
+  if [ ! -w "$DEST" ]; then
+    err "No write permission to $DEST"
+    err "Try running with sudo or choose a writable --dest"
+    exit 1
+  fi
+}
+
+check_existing_install() {
+  if [ -x "$DEST/dcg" ]; then
+    local current
+    current=$("$DEST/dcg" --version 2>/dev/null | head -1 || echo "")
+    if [ -n "$current" ]; then
+      info "Existing dcg detected: $current"
+    fi
+  fi
+}
+
+check_network() {
+  if [ "$OFFLINE" -eq 1 ]; then
+    info "Offline mode enabled; skipping network preflight"
+    return 0
+  fi
+  if [ "$FROM_SOURCE" -eq 1 ]; then
+    return 0
+  fi
+  if [ -z "$URL" ]; then
+    return 0
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    warn "curl not found; skipping network check"
+    return 0
+  fi
+  if ! curl -fsSL --connect-timeout 3 --max-time 5 -o /dev/null "$URL"; then
+    warn "Network check failed for $URL"
+    warn "Continuing; download may fail"
+  fi
+}
+
+preflight_checks() {
+  info "Running preflight checks"
+  check_disk_space
+  check_write_permissions
+  check_existing_install
+  check_network
+}
+
 maybe_add_path() {
   case ":$PATH:" in
     *:"$DEST":*) return 0;;
@@ -368,6 +483,60 @@ maybe_add_path() {
       fi
     ;;
   esac
+}
+
+detect_default_shell() {
+  local shell="${SHELL:-}"
+  [ -z "$shell" ] && return 1
+  shell=$(basename "$shell")
+  case "$shell" in
+    bash|zsh|fish) echo "$shell"; return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+install_completions_for_shell() {
+  local shell="$1"
+  local bin="$DEST/dcg"
+  if [ ! -x "$bin" ]; then
+    warn "dcg binary not found at $bin; skipping completions"
+    return 1
+  fi
+
+  local target=""
+  case "$shell" in
+    bash)
+      target="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions/dcg"
+      ;;
+    zsh)
+      target="${XDG_DATA_HOME:-$HOME/.local/share}/zsh/site-functions/_dcg"
+      ;;
+    fish)
+      target="${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions/dcg.fish"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  mkdir -p "$(dirname "$target")"
+  if "$bin" completions "$shell" > "$target" 2>/dev/null; then
+    ok "Installed $shell completions to $target"
+    return 0
+  fi
+
+  warn "Failed to install $shell completions"
+  return 1
+}
+
+maybe_install_completions() {
+  local shell=""
+  if ! shell=$(detect_default_shell); then
+    info "Shell completions: skipped (unknown shell)"
+    return 0
+  fi
+
+  install_completions_for_shell "$shell" || true
 }
 
 ensure_rust() {
@@ -431,7 +600,7 @@ usage() {
   cat <<EOFU
 Usage: install.sh [--version vX.Y.Z] [--dest DIR] [--system] [--easy-mode] [--verify] \\
                   [--artifact-url URL] [--checksum HEX] [--checksum-url URL] [--quiet] \\
-                  [--no-gum] [--no-verify] [--force]
+                  [--offline] [--no-gum] [--no-verify] [--force]
 
 Options:
   --version vX.Y.Z   Install specific version (default: latest)
@@ -441,6 +610,7 @@ Options:
   --verify           Run self-test after install
   --from-source      Build from source instead of downloading binary
   --quiet            Suppress non-error output
+  --offline          Skip network preflight checks
   --no-gum           Disable gum formatting even if available
   --no-verify        Skip checksum verification (for testing only)
   --force            Force reinstall even if same version is installed
@@ -459,6 +629,7 @@ while [ $# -gt 0 ]; do
     --checksum-url) CHECKSUM_URL="$2"; shift 2;;
     --from-source) FROM_SOURCE=1; shift;;
     --quiet|-q) QUIET=1; shift;;
+    --offline) OFFLINE=1; shift;;
     --no-gum) NO_GUM=1; shift;;
     --no-verify) NO_CHECKSUM=1; shift;;
     --force) FORCE_INSTALL=1; shift;;
@@ -492,6 +663,9 @@ if [ "$QUIET" -eq 0 ]; then
 fi
 
 resolve_version
+detect_platform
+set_artifact_url
+preflight_checks
 
 # Check if already at target version (skip download if so, unless --force)
 if [ "$FORCE_INSTALL" -eq 0 ] && check_installed_version "$VERSION"; then
@@ -522,41 +696,9 @@ if [ "$FORCE_INSTALL" -eq 0 ] && check_installed_version "$VERSION"; then
     *) : ;;
   esac
 
+  maybe_install_completions
+
   exit 0
-fi
-
-mkdir -p "$DEST"
-OS=$(uname -s | tr 'A-Z' 'a-z')
-ARCH=$(uname -m)
-case "$ARCH" in
-  x86_64|amd64) ARCH="x86_64" ;;
-  arm64|aarch64) ARCH="aarch64" ;;
-  *) warn "Unknown arch $ARCH, using as-is" ;;
-esac
-
-TARGET=""
-case "${OS}-${ARCH}" in
-  linux-x86_64) TARGET="x86_64-unknown-linux-gnu" ;;
-  linux-aarch64) TARGET="aarch64-unknown-linux-gnu" ;;
-  darwin-x86_64) TARGET="x86_64-apple-darwin" ;;
-  darwin-aarch64) TARGET="aarch64-apple-darwin" ;;
-  *) :;;
-esac
-
-# Prefer prebuilt artifact when we know the target or the caller supplied a direct URL.
-TAR=""
-URL=""
-if [ "$FROM_SOURCE" -eq 0 ]; then
-  if [ -n "$ARTIFACT_URL" ]; then
-    TAR=$(basename "$ARTIFACT_URL")
-    URL="$ARTIFACT_URL"
-  elif [ -n "$TARGET" ]; then
-    TAR="dcg-${TARGET}.tar.xz"
-    URL="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/${TAR}"
-  else
-    warn "No prebuilt artifact for ${OS}/${ARCH}; falling back to build-from-source"
-    FROM_SOURCE=1
-  fi
 fi
 
 # Cross-platform locking using mkdir (atomic on all POSIX systems including macOS)
@@ -614,6 +756,7 @@ if [ "$FROM_SOURCE" -eq 1 ]; then
     ok "Self-test complete"
   fi
   ok "Done. Binary at: $DEST/dcg"
+  maybe_install_completions
   exit 0
 fi
 
@@ -664,6 +807,7 @@ if [ "$VERIFY" -eq 1 ]; then
 fi
 
 ok "Done. Binary at: $DEST/dcg"
+maybe_install_completions
 echo ""
 
 # ═══════════════════════════════════════════════════════════════════════════════
