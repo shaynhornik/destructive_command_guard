@@ -69,54 +69,134 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
         destructive_pattern!(
             "meili-curl-delete-document",
             r#"curl\b.*-X\s*DELETE\b.*\b(?:https?://)?[^\s'\"]*(?:meili|:7700)[^\s'\"]*/indexes/[^\s/?]+/documents/[^\s/?]+"#,
-            "curl -X DELETE against /documents/{id} removes a document from Meilisearch."
+            "curl -X DELETE against /documents/{id} removes a document from Meilisearch.",
+            Medium,
+            "Deleting a single document removes it from search results immediately. While \
+             less destructive than bulk operations, applications expecting this document \
+             will receive errors or empty results.\n\n\
+             Safer alternatives:\n\
+             - GET /indexes/{uid}/documents/{id}: Verify document first\n\
+             - Export document content before deletion\n\
+             - Use soft delete field in documents instead"
         ),
         destructive_pattern!(
             "meili-curl-delete-documents",
             r#"curl\b.*-X\s*DELETE\b.*\b(?:https?://)?[^\s'\"]*(?:meili|:7700)[^\s'\"]*/indexes/[^\s/?]+/documents(?:[\s?'"]|$)"#,
-            "curl -X DELETE against /documents removes documents from Meilisearch."
+            "curl -X DELETE against /documents removes documents from Meilisearch.",
+            High,
+            "Deleting all documents removes every record from the index while preserving \
+             settings and configuration. Search will return no results until re-indexing. \
+             This cannot be undone.\n\n\
+             Safer alternatives:\n\
+             - GET /indexes/{uid}/documents: Export documents first\n\
+             - Create a snapshot or dump before deletion\n\
+             - Use delete-batch for targeted removal instead"
         ),
         destructive_pattern!(
             "meili-curl-delete-batch",
             r#"curl\b.*-X\s*POST\b.*\b(?:https?://)?[^\s'\"]*(?:meili|:7700)[^\s'\"]*/indexes/[^\s/?]+/documents/delete-batch\b"#,
-            "curl -X POST to /documents/delete-batch deletes documents in bulk."
+            "curl -X POST to /documents/delete-batch deletes documents in bulk.",
+            High,
+            "Batch delete removes multiple documents by their IDs in a single operation. \
+             This is irreversible and affects all documents matching the provided IDs. \
+             Verify the ID list carefully before executing.\n\n\
+             Safer alternatives:\n\
+             - GET documents by ID to verify content first\n\
+             - Export matching documents before deletion\n\
+             - Test with a small batch before processing all"
         ),
         destructive_pattern!(
             "meili-curl-delete-key",
             r#"curl\b.*-X\s*DELETE\b.*\b(?:https?://)?[^\s'\"]*(?:meili|:7700)[^\s'\"]*/keys/[^\s/?]+"#,
-            "curl -X DELETE against /keys removes a Meilisearch API key."
+            "curl -X DELETE against /keys removes a Meilisearch API key.",
+            High,
+            "Deleting an API key immediately revokes access for all applications using it. \
+             Search and indexing operations will fail with authentication errors. The key \
+             cannot be recovered after deletion.\n\n\
+             Safer alternatives:\n\
+             - GET /keys: List and document keys before deletion\n\
+             - Create replacement key before deleting old one\n\
+             - Update applications with new key first"
         ),
         // Generic index deletion last
         destructive_pattern!(
             "meili-curl-delete-index",
             r#"curl\b.*-X\s*DELETE\b.*\b(?:https?://)?[^\s'\"]*(?:meili|:7700)[^\s'\"]*/indexes/[^\s/?]+(?:[\s?'"]|$)"#,
-            "curl -X DELETE against /indexes/{uid} deletes a Meilisearch index."
+            "curl -X DELETE against /indexes/{uid} deletes a Meilisearch index.",
+            Critical,
+            "Deleting a Meilisearch index permanently removes all documents, settings, \
+             filterable attributes, and ranking rules. Search functionality for applications \
+             using this index will fail immediately.\n\n\
+             Safer alternatives:\n\
+             - GET /indexes/{uid}: Export index settings first\n\
+             - Create a dump with POST /dumps for backup\n\
+             - Re-index from source data after verification"
         ),
         // HTTPie variants
         destructive_pattern!(
             "meili-http-delete-document",
             r"http\s+DELETE\s+(?:https?://)?\S*(?:meili|:7700)\S*/indexes/\S+/documents/\S+",
-            "http DELETE against /documents/{id} removes a document from Meilisearch."
+            "http DELETE against /documents/{id} removes a document from Meilisearch.",
+            Medium,
+            "Deleting a single document removes it from search results immediately. While \
+             less destructive than bulk operations, applications expecting this document \
+             will receive errors or empty results.\n\n\
+             Safer alternatives:\n\
+             - GET /indexes/{uid}/documents/{id}: Verify document first\n\
+             - Export document content before deletion\n\
+             - Use soft delete field in documents instead"
         ),
         destructive_pattern!(
             "meili-http-delete-documents",
             r"http\s+DELETE\s+(?:https?://)?\S*(?:meili|:7700)\S*/indexes/\S+/documents(?:[\s?]|$)",
-            "http DELETE against /documents removes documents from Meilisearch."
+            "http DELETE against /documents removes documents from Meilisearch.",
+            High,
+            "Deleting all documents removes every record from the index while preserving \
+             settings and configuration. Search will return no results until re-indexing. \
+             This cannot be undone.\n\n\
+             Safer alternatives:\n\
+             - GET /indexes/{uid}/documents: Export documents first\n\
+             - Create a snapshot or dump before deletion\n\
+             - Use delete-batch for targeted removal instead"
         ),
         destructive_pattern!(
             "meili-http-delete-batch",
             r"http\s+POST\s+(?:https?://)?\S*(?:meili|:7700)\S*/indexes/\S+/documents/delete-batch\b",
-            "http POST to /documents/delete-batch deletes documents in bulk."
+            "http POST to /documents/delete-batch deletes documents in bulk.",
+            High,
+            "Batch delete removes multiple documents by their IDs in a single operation. \
+             This is irreversible and affects all documents matching the provided IDs. \
+             Verify the ID list carefully before executing.\n\n\
+             Safer alternatives:\n\
+             - GET documents by ID to verify content first\n\
+             - Export matching documents before deletion\n\
+             - Test with a small batch before processing all"
         ),
         destructive_pattern!(
             "meili-http-delete-key",
             r"http\s+DELETE\s+(?:https?://)?\S*(?:meili|:7700)\S*/keys/\S+",
-            "http DELETE against /keys removes a Meilisearch API key."
+            "http DELETE against /keys removes a Meilisearch API key.",
+            High,
+            "Deleting an API key immediately revokes access for all applications using it. \
+             Search and indexing operations will fail with authentication errors. The key \
+             cannot be recovered after deletion.\n\n\
+             Safer alternatives:\n\
+             - GET /keys: List and document keys before deletion\n\
+             - Create replacement key before deleting old one\n\
+             - Update applications with new key first"
         ),
         destructive_pattern!(
             "meili-http-delete-index",
             r"http\s+DELETE\s+(?:https?://)?\S*(?:meili|:7700)\S*/indexes/\S+(?:[\s?]|$)",
-            "http DELETE against /indexes/{uid} deletes a Meilisearch index."
+            "http DELETE against /indexes/{uid} deletes a Meilisearch index.",
+            Critical,
+            "Deleting a Meilisearch index permanently removes all documents, settings, \
+             filterable attributes, and ranking rules. Search functionality for applications \
+             using this index will fail immediately.\n\n\
+             Safer alternatives:\n\
+             - GET /indexes/{uid}: Export index settings first\n\
+             - Create a dump with POST /dumps for backup\n\
+             - Re-index from source data after verification"
         ),
     ]
 }
