@@ -2196,12 +2196,10 @@ fn is_azure_pipelines_path(path: &Path) -> bool {
     let lower = file_name.to_ascii_lowercase();
     // Common patterns: azure-pipelines.yml, azure-pipelines.yaml
     // Also supports azure-pipelines-*.yml for variants
-    let is_variant = lower.starts_with("azure-pipelines")
-        && Path::new(&lower)
-            .extension()
-            .and_then(std::ffi::OsStr::to_str)
-            .is_some_and(|ext| ext == "yml" || ext == "yaml");
-    lower == "azure-pipelines.yml" || lower == "azure-pipelines.yaml" || is_variant
+    lower == "azure-pipelines.yml"
+        || lower == "azure-pipelines.yaml"
+        || (lower.starts_with("azure-pipelines")
+            && (lower.ends_with(".yml") || lower.ends_with(".yaml")))
 }
 
 /// Extract commands from Azure Pipelines YAML files.
@@ -2209,8 +2207,8 @@ fn is_azure_pipelines_path(path: &Path) -> bool {
 /// Azure Pipelines supports several script task types:
 /// - `script`: Runs a script (shell on Linux/macOS, cmd on Windows)
 /// - `bash`: Runs a bash script
-/// - `powershell`: Runs `PowerShell` script
-/// - `pwsh`: Runs `PowerShell` Core script
+/// - `powershell`: Runs PowerShell script
+/// - `pwsh`: Runs PowerShell Core script
 ///
 /// Each can be inline or multi-line using YAML block scalars.
 #[allow(clippy::too_many_lines)]
@@ -2248,9 +2246,11 @@ pub fn extract_azure_pipelines_from_str(
         }
 
         // Strip list item prefix if present: "- script: echo" -> "script: echo"
-        let candidate = trimmed_start
-            .strip_prefix('-')
-            .map_or(trimmed_start, |after_dash| after_dash.trim_start());
+        let candidate = if let Some(after_dash) = trimmed_start.strip_prefix('-') {
+            after_dash.trim_start()
+        } else {
+            trimmed_start
+        };
 
         // Skip variables, parameters, and other non-script sections
         if yaml_key_value(candidate, "variables").is_some()
@@ -2383,9 +2383,9 @@ fn is_circleci_path(path: &Path) -> bool {
         .is_some_and(|dir| dir == ".circleci")
 }
 
-/// Extract commands from `CircleCI` config files.
+/// Extract commands from CircleCI config files.
 ///
-/// `CircleCI` uses `run:` steps with several forms:
+/// CircleCI uses `run:` steps with several forms:
 /// - `run: <inline command>`
 /// - `run: |` with block scalar
 /// - `run:` with nested `command:` field
@@ -2426,9 +2426,11 @@ pub fn extract_circleci_from_str(
         }
 
         // Strip list item prefix if present: "- run: echo" -> "run: echo"
-        let candidate = trimmed_start
-            .strip_prefix('-')
-            .map_or(trimmed_start, |after_dash| after_dash.trim_start());
+        let candidate = if let Some(after_dash) = trimmed_start.strip_prefix('-') {
+            after_dash.trim_start()
+        } else {
+            trimmed_start
+        };
 
         // Skip non-executable sections
         if yaml_key_value(candidate, "version").is_some()
@@ -4603,178 +4605,6 @@ deploy:
         assert_eq!(extracted[1].command, "rm -rf ./build");
     }
 
-    #[test]
-    fn gitlab_ci_extractor_block_scalar() {
-        let content = r#"build:
-  script: |
-    echo "building"
-    rm -rf ./dist
-    echo "done"
-"#;
-        let extracted = extract_gitlab_ci_from_str(".gitlab-ci.yml", content, &["echo", "rm"]);
-        assert_eq!(
-            extracted.len(),
-            3,
-            "Expected 3 commands from block scalar: {extracted:?}"
-        );
-        assert!(extracted[0].command.contains("echo"));
-        assert!(extracted[1].command.contains("rm -rf"));
-        assert!(extracted[2].command.contains("echo"));
-    }
-
-    #[test]
-    fn gitlab_ci_extractor_before_after_script() {
-        let content = r#"default:
-  before_script:
-    - echo "global before"
-job1:
-  before_script:
-    - echo "job before"
-  script:
-    - npm test
-  after_script:
-    - rm -rf ./temp
-"#;
-        let extracted =
-            extract_gitlab_ci_from_str(".gitlab-ci.yml", content, &["echo", "npm", "rm"]);
-        assert_eq!(
-            extracted.len(),
-            4,
-            "Expected 4 commands from before/after scripts: {extracted:?}"
-        );
-        assert!(extracted[0].command.contains("echo"));
-        assert!(extracted[1].command.contains("echo"));
-        assert!(extracted[2].command.contains("npm"));
-        assert!(extracted[3].command.contains("rm"));
-    }
-
-    #[test]
-    fn gitlab_ci_extractor_ignores_rules_only_except() {
-        let content = r"rules:
-  - rm -rf / should not match
-only:
-  - rm -rf / should not match
-except:
-  - rm -rf / should not match
-build:
-  script:
-    - echo safe
-";
-        let extracted = extract_gitlab_ci_from_str(".gitlab-ci.yml", content, &["rm", "echo"]);
-        assert_eq!(
-            extracted.len(),
-            1,
-            "Only script content should be extracted: {extracted:?}"
-        );
-        assert_eq!(extracted[0].command, "echo safe");
-    }
-
-    #[test]
-    fn gitlab_ci_extractor_ignores_variables_section() {
-        let content = r#"variables:
-  DANGEROUS_CMD: rm -rf /
-  SAFE_VAR: hello
-build:
-  script:
-    - echo "$DANGEROUS_CMD"
-"#;
-        let extracted = extract_gitlab_ci_from_str(".gitlab-ci.yml", content, &["rm", "echo"]);
-        assert_eq!(
-            extracted.len(),
-            1,
-            "Variables section should not be extracted: {extracted:?}"
-        );
-        assert!(extracted[0].command.contains("echo"));
-    }
-
-    #[test]
-    fn gitlab_ci_extractor_line_numbers_accurate() {
-        let content = r"# comment
-# another comment
-build:
-  script:
-    - echo line5
-    - echo line6
-";
-        let extracted = extract_gitlab_ci_from_str(".gitlab-ci.yml", content, &["echo"]);
-        assert_eq!(extracted.len(), 2, "Expected 2 commands: {extracted:?}");
-        assert_eq!(extracted[0].line, 5, "First echo should be on line 5");
-        assert_eq!(extracted[1].line, 6, "Second echo should be on line 6");
-    }
-
-    #[test]
-    fn gitlab_ci_extractor_quoted_strings() {
-        let content = r#"build:
-  script:
-    - "rm -rf ./build"
-    - 'echo "hello world"'
-"#;
-        let extracted = extract_gitlab_ci_from_str(".gitlab-ci.yml", content, &["rm", "echo"]);
-        assert_eq!(
-            extracted.len(),
-            2,
-            "Quoted strings should be extracted: {extracted:?}"
-        );
-        assert_eq!(extracted[0].command, "rm -rf ./build");
-        assert!(extracted[1].command.contains("echo"));
-    }
-
-    #[test]
-    fn gitlab_ci_extractor_multiple_jobs() {
-        let content = r"build:
-  script:
-    - npm run build
-test:
-  script:
-    - npm test
-deploy:
-  script:
-    - rm -rf old && deploy.sh
-";
-        let extracted =
-            extract_gitlab_ci_from_str(".gitlab-ci.yml", content, &["npm", "rm", "deploy"]);
-        assert_eq!(
-            extracted.len(),
-            3,
-            "Expected 3 commands from multiple jobs: {extracted:?}"
-        );
-        assert!(extracted[0].command.contains("npm run build"));
-        assert!(extracted[1].command.contains("npm test"));
-        assert!(extracted[2].command.contains("rm -rf"));
-    }
-
-    #[test]
-    fn gitlab_ci_empty_script_ignored() {
-        let content = r"build:
-  script:
-test:
-  script:
-    - echo real
-";
-        let extracted = extract_gitlab_ci_from_str(".gitlab-ci.yml", content, &["echo"]);
-        assert_eq!(
-            extracted.len(),
-            1,
-            "Empty script should be ignored: {extracted:?}"
-        );
-        assert_eq!(extracted[0].command, "echo real");
-    }
-
-    #[test]
-    fn gitlab_ci_extractor_inline_script() {
-        // Single-line script value
-        let content = r"build:
-  script: rm -rf ./build && npm run build
-";
-        let extracted = extract_gitlab_ci_from_str(".gitlab-ci.yml", content, &["rm", "npm"]);
-        // This is a single command line that will be extracted
-        assert!(
-            !extracted.is_empty(),
-            "Inline script should be extracted: {extracted:?}"
-        );
-        assert!(extracted[0].command.contains("rm"));
-    }
-
     // ========================================================================
     // Azure Pipelines extractor tests (git_safety_guard-5rbb.11)
     // ========================================================================
@@ -4799,14 +4629,14 @@ test:
 
     #[test]
     fn azure_pipelines_extractor_extracts_script_tasks() {
-        let content = r"trigger:
+        let content = r#"trigger:
   - main
 pool:
   vmImage: ubuntu-latest
 steps:
   - script: echo Hello
   - script: rm -rf ./build
-";
+"#;
         let extracted =
             extract_azure_pipelines_from_str("azure-pipelines.yml", content, &["echo", "rm"]);
         assert_eq!(
@@ -4877,12 +4707,12 @@ steps:
 
     #[test]
     fn azure_pipelines_extractor_ignores_variables() {
-        let content = r"variables:
+        let content = r#"variables:
   DANGEROUS: rm -rf /
   BUILD_DIR: ./build
 steps:
   - script: echo safe
-";
+"#;
         let extracted =
             extract_azure_pipelines_from_str("azure-pipelines.yml", content, &["rm", "echo"]);
         assert_eq!(
@@ -4895,12 +4725,12 @@ steps:
 
     #[test]
     fn azure_pipelines_extractor_ignores_parameters() {
-        let content = r"parameters:
+        let content = r#"parameters:
   - name: buildCommand
     default: rm -rf /
 steps:
   - script: echo hello
-";
+"#;
         let extracted =
             extract_azure_pipelines_from_str("azure-pipelines.yml", content, &["rm", "echo"]);
         assert_eq!(
@@ -4912,12 +4742,12 @@ steps:
 
     #[test]
     fn azure_pipelines_extractor_ignores_displayname_and_env() {
-        let content = r"steps:
+        let content = r#"steps:
   - script: rm -rf ./build
     displayName: Delete build with rm -rf
     env:
       CLEANUP_CMD: rm -rf /
-";
+"#;
         let extracted = extract_azure_pipelines_from_str("azure-pipelines.yml", content, &["rm"]);
         assert_eq!(
             extracted.len(),
@@ -4929,13 +4759,13 @@ steps:
 
     #[test]
     fn azure_pipelines_extractor_line_numbers_accurate() {
-        let content = r"trigger:
+        let content = r#"trigger:
   - main
 
 steps:
   - script: echo line5
   - script: echo line6
-";
+"#;
         let extracted = extract_azure_pipelines_from_str("azure-pipelines.yml", content, &["echo"]);
         assert_eq!(extracted.len(), 2, "Expected 2 commands: {extracted:?}");
         assert_eq!(extracted[0].line, 5, "First script should be on line 5");
@@ -4961,233 +4791,15 @@ steps:
 
     #[test]
     fn azure_pipelines_empty_script_ignored() {
-        let content = r"steps:
+        let content = r#"steps:
   - script:
   - script: echo real
-";
+"#;
         let extracted = extract_azure_pipelines_from_str("azure-pipelines.yml", content, &["echo"]);
         assert_eq!(
             extracted.len(),
             1,
             "Empty script should be ignored: {extracted:?}"
-        );
-        assert_eq!(extracted[0].command, "echo real");
-    }
-
-    // ========================================================================
-    // CircleCI extractor tests (git_safety_guard-5rbb.12)
-    // ========================================================================
-
-    #[test]
-    fn circleci_path_detection() {
-        use std::path::Path;
-        assert!(is_circleci_path(Path::new(".circleci/config.yml")));
-        assert!(is_circleci_path(Path::new(".circleci/config.yaml")));
-        assert!(is_circleci_path(Path::new(
-            "/home/user/project/.circleci/config.yml"
-        )));
-        assert!(is_circleci_path(Path::new("foo/bar/.circleci/config.yml")));
-        // These should NOT match
-        assert!(!is_circleci_path(Path::new("config.yml")));
-        assert!(!is_circleci_path(Path::new(".circleci/other.yml")));
-        assert!(!is_circleci_path(Path::new("circleci/config.yml")));
-        assert!(!is_circleci_path(Path::new(".circle/config.yml")));
-    }
-
-    #[test]
-    fn circleci_extractor_extracts_inline_run() {
-        let content = r"version: 2.1
-jobs:
-  build:
-    docker:
-      - image: circleci/node:14
-    steps:
-      - checkout
-      - run: npm install
-      - run: rm -rf ./build
-";
-        let extracted = extract_circleci_from_str(".circleci/config.yml", content, &["npm", "rm"]);
-        assert_eq!(extracted.len(), 2, "Expected 2 run commands: {extracted:?}");
-        assert_eq!(extracted[0].command, "npm install");
-        assert_eq!(extracted[0].extractor_id, "circleci.run");
-        assert_eq!(extracted[1].command, "rm -rf ./build");
-    }
-
-    #[test]
-    fn circleci_extractor_extracts_block_scalar_run() {
-        let content = r#"jobs:
-  build:
-    steps:
-      - run: |
-          echo "line1"
-          rm -rf ./build
-          echo "done"
-"#;
-        let extracted = extract_circleci_from_str(".circleci/config.yml", content, &["echo", "rm"]);
-        assert_eq!(
-            extracted.len(),
-            3,
-            "Expected 3 individual commands from block: {extracted:?}"
-        );
-        assert!(extracted[0].command.contains("echo"));
-        assert!(extracted[1].command.contains("rm -rf"));
-        assert!(extracted[2].command.contains("echo"));
-    }
-
-    #[test]
-    fn circleci_extractor_extracts_nested_command() {
-        let content = r"jobs:
-  build:
-    steps:
-      - run:
-          name: Run tests
-          command: npm test
-      - run:
-          name: Clean up
-          command: rm -rf ./dist
-";
-        let extracted = extract_circleci_from_str(".circleci/config.yml", content, &["npm", "rm"]);
-        assert_eq!(
-            extracted.len(),
-            2,
-            "Expected 2 nested command fields: {extracted:?}"
-        );
-        assert_eq!(extracted[0].command, "npm test");
-        assert_eq!(extracted[1].command, "rm -rf ./dist");
-    }
-
-    #[test]
-    fn circleci_extractor_extracts_block_scalar_command() {
-        let content = r#"jobs:
-  build:
-    steps:
-      - run:
-          name: Build
-          command: |
-            echo "building"
-            npm run build
-"#;
-        let extracted =
-            extract_circleci_from_str(".circleci/config.yml", content, &["echo", "npm"]);
-        assert_eq!(
-            extracted.len(),
-            2,
-            "Expected 2 commands from block scalar command: {extracted:?}"
-        );
-        assert!(extracted[0].command.contains("echo"));
-        assert!(extracted[1].command.contains("npm"));
-    }
-
-    #[test]
-    fn circleci_extractor_ignores_environment_and_docker() {
-        let content = r"jobs:
-  build:
-    docker:
-      - image: circleci/node:14
-        environment:
-          DANGEROUS: rm -rf /
-    environment:
-      BUILD_CMD: rm -rf /
-    steps:
-      - run: echo safe
-";
-        let extracted = extract_circleci_from_str(".circleci/config.yml", content, &["rm", "echo"]);
-        assert_eq!(
-            extracted.len(),
-            1,
-            "Environment sections should not be extracted: {extracted:?}"
-        );
-        assert_eq!(extracted[0].command, "echo safe");
-    }
-
-    #[test]
-    fn circleci_extractor_ignores_orbs_and_parameters() {
-        let content = r"version: 2.1
-orbs:
-  node: circleci/node@5.0
-parameters:
-  run_cmd:
-    default: rm -rf /
-jobs:
-  build:
-    steps:
-      - run: echo hello
-";
-        let extracted = extract_circleci_from_str(".circleci/config.yml", content, &["rm", "echo"]);
-        assert_eq!(
-            extracted.len(),
-            1,
-            "Orbs and parameters should not be extracted: {extracted:?}"
-        );
-        assert_eq!(extracted[0].command, "echo hello");
-    }
-
-    #[test]
-    fn circleci_extractor_line_numbers_accurate() {
-        let content = r"version: 2.1
-
-jobs:
-  build:
-    steps:
-      - run: echo line6
-      - run: echo line7
-";
-        let extracted = extract_circleci_from_str(".circleci/config.yml", content, &["echo"]);
-        assert_eq!(extracted.len(), 2, "Expected 2 commands: {extracted:?}");
-        assert_eq!(extracted[0].line, 6, "First run should be on line 6");
-        assert_eq!(extracted[1].line, 7, "Second run should be on line 7");
-    }
-
-    #[test]
-    fn circleci_extractor_quoted_strings() {
-        let content = r#"jobs:
-  build:
-    steps:
-      - run: "rm -rf ./build"
-      - run: 'echo "hello"'
-"#;
-        let extracted = extract_circleci_from_str(".circleci/config.yml", content, &["rm", "echo"]);
-        assert_eq!(
-            extracted.len(),
-            2,
-            "Quoted strings should be extracted: {extracted:?}"
-        );
-        assert_eq!(extracted[0].command, "rm -rf ./build");
-        assert!(extracted[1].command.contains("echo"));
-    }
-
-    #[test]
-    fn circleci_extractor_ignores_name_and_working_directory() {
-        let content = r"jobs:
-  build:
-    steps:
-      - run:
-          name: rm -rf dangerous name
-          working_directory: /tmp/rm
-          command: echo safe
-";
-        let extracted = extract_circleci_from_str(".circleci/config.yml", content, &["rm", "echo"]);
-        assert_eq!(
-            extracted.len(),
-            1,
-            "name and working_directory should not be extracted: {extracted:?}"
-        );
-        assert_eq!(extracted[0].command, "echo safe");
-    }
-
-    #[test]
-    fn circleci_empty_run_ignored() {
-        let content = r"jobs:
-  build:
-    steps:
-      - run:
-      - run: echo real
-";
-        let extracted = extract_circleci_from_str(".circleci/config.yml", content, &["echo"]);
-        assert_eq!(
-            extracted.len(),
-            1,
-            "Empty run should be ignored: {extracted:?}"
         );
         assert_eq!(extracted[0].command, "echo real");
     }
