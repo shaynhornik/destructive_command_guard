@@ -130,10 +130,15 @@ fn warn_unknown_hooks_toml_keys(value: &toml::Value, path: &str, warnings: &mut 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum ScanFormat {
+    /// Human-readable output
+    #[value(alias = "text")]
     Pretty,
+    /// Structured JSON output
     Json,
     /// GitHub-flavored Markdown for PR comments (uses `<details>` blocks)
     Markdown,
+    /// SARIF 2.1.0 output (for code scanning tools)
+    Sarif,
 }
 
 /// Controls scan failure behavior (CI integration).
@@ -1004,6 +1009,7 @@ fn is_shell_script_path(path: &Path) -> bool {
 }
 
 /// Extract commands from shell scripts (.sh, .bash files)
+#[must_use]
 pub fn extract_shell_script_from_str(
     file: &str,
     content: &str,
@@ -1426,6 +1432,7 @@ fn is_dockerfile_path(path: &Path) -> bool {
 }
 
 /// Extract commands from Dockerfile RUN instructions
+#[must_use]
 pub fn extract_dockerfile_from_str(
     file: &str,
     content: &str,
@@ -1571,6 +1578,7 @@ fn is_github_actions_workflow_path(path: &Path) -> bool {
 
 /// Extract commands from GitHub Actions workflow run steps
 #[allow(clippy::too_many_lines)]
+#[must_use]
 pub fn extract_github_actions_workflow_from_str(
     file: &str,
     content: &str,
@@ -2167,6 +2175,7 @@ fn is_makefile_path(path: &Path) -> bool {
 }
 
 /// Extract commands from Makefile recipe lines
+#[must_use]
 pub fn extract_makefile_from_str(
     file: &str,
     content: &str,
@@ -3261,7 +3270,10 @@ fail_on = "nope"
         let finding = finding.unwrap();
         assert_eq!(finding.decision, ScanDecision::Deny);
         assert!(
-            finding.reason.as_ref().map_or(false, |r| r.contains("git reset --hard")),
+            finding
+                .reason
+                .as_ref()
+                .is_some_and(|r| r.contains("git reset --hard")),
             "Reason should mention the blocked command: {:?}",
             finding.reason
         );
@@ -3280,16 +3292,14 @@ fail_on = "nope"
 
         // The extracted command should be the full sh -c "..." string
         let cmd = &extracted[0].command;
-        eprintln!("Extracted command: {:?}", cmd);
+        eprintln!("Extracted command: {cmd:?}");
         assert!(
             cmd.contains("sh -c"),
-            "Extracted command should contain 'sh -c': {:?}",
-            cmd
+            "Extracted command should contain 'sh -c': {cmd:?}"
         );
         assert!(
             cmd.contains("git reset --hard"),
-            "Extracted command should contain the dangerous command: {:?}",
-            cmd
+            "Extracted command should contain the dangerous command: {cmd:?}"
         );
     }
 
@@ -3313,7 +3323,8 @@ fail_on = "nope"
         };
 
         // Step 1: Extract
-        let extracted = extract_docker_compose_from_str("docker-compose.yml", content, &ctx.enabled_keywords);
+        let extracted =
+            extract_docker_compose_from_str("docker-compose.yml", content, &ctx.enabled_keywords);
         eprintln!("Enabled keywords: {:?}", ctx.enabled_keywords);
         eprintln!("Extracted {} commands: {:?}", extracted.len(), extracted);
         assert!(!extracted.is_empty(), "Should extract at least 1 command");
@@ -3323,7 +3334,7 @@ fail_on = "nope"
         for cmd in &extracted {
             eprintln!("Evaluating command: {:?}", cmd.command);
             if let Some(finding) = evaluate_extracted_command(cmd, &options, &config, &ctx) {
-                eprintln!("Found finding: {:?}", finding);
+                eprintln!("Found finding: {finding:?}");
                 found_finding = true;
                 assert_eq!(finding.decision, ScanDecision::Deny);
             }
@@ -4760,7 +4771,119 @@ RUN echo "path\\with\\backslashes" && rm -rf /tmp"#;
             ENV CLEANUP_CMD=\"rm -rf /tmp\"\n\
             RUN echo safe";
         let extracted = extract_dockerfile_from_str("Dockerfile", content, &["rm"]);
-        assert!(extracted.is_empty());
+        assert!(
+            extracted.is_empty(),
+            "ENV values should not be extracted as commands: got {extracted:?}"
+        );
+    }
+
+    #[test]
+    fn dockerfile_empty_run_instruction() {
+        // Empty RUN should be skipped (no command to extract)
+        let content = "FROM alpine\nRUN\nRUN apt-get update";
+        let extracted = extract_dockerfile_from_str("Dockerfile", content, &["apt"]);
+        assert_eq!(
+            extracted.len(),
+            1,
+            "Expected 1 command from non-empty RUN, got: {extracted:?}"
+        );
+        assert_eq!(extracted[0].command, "apt-get update");
+    }
+
+    #[test]
+    fn dockerfile_run_with_only_whitespace() {
+        // RUN followed by only whitespace should be skipped
+        let content = "FROM alpine\nRUN   \nRUN apt-get update";
+        let extracted = extract_dockerfile_from_str("Dockerfile", content, &["apt"]);
+        assert_eq!(
+            extracted.len(),
+            1,
+            "Expected 1 command (whitespace-only RUN skipped), got: {extracted:?}"
+        );
+    }
+
+    #[test]
+    fn dockerfile_case_insensitive_run() {
+        // RUN instruction is case-insensitive per Dockerfile spec
+        let content = "FROM alpine\nrun apt-get update\nRUN apt-get install";
+        let extracted = extract_dockerfile_from_str("Dockerfile", content, &["apt"]);
+        assert_eq!(
+            extracted.len(),
+            2,
+            "Both 'run' and 'RUN' should be extracted: {extracted:?}"
+        );
+    }
+
+    #[test]
+    fn dockerfile_mixed_case_run() {
+        // Mixed case RUN should also work
+        let content = "FROM alpine\nRuN apt-get update";
+        let extracted = extract_dockerfile_from_str("Dockerfile", content, &["apt"]);
+        assert_eq!(
+            extracted.len(),
+            1,
+            "Mixed case 'RuN' should be extracted: {extracted:?}"
+        );
+    }
+
+    #[test]
+    fn dockerfile_line_numbers_accurate() {
+        // Verify line numbers are correctly reported
+        let content = "FROM alpine\n\nRUN echo line3\n\nRUN echo line5";
+        let extracted = extract_dockerfile_from_str("Dockerfile", content, &["echo"]);
+        assert_eq!(extracted.len(), 2, "Expected 2 RUN commands: {extracted:?}");
+        assert_eq!(
+            extracted[0].line, 3,
+            "First RUN should be on line 3: {extracted:?}"
+        );
+        assert_eq!(
+            extracted[1].line, 5,
+            "Second RUN should be on line 5: {extracted:?}"
+        );
+    }
+
+    #[test]
+    fn dockerfile_extractor_id_correct() {
+        // Verify extractor_id is set correctly for shell vs exec form
+        let content = "FROM alpine\nRUN echo shell\nRUN [\"echo\", \"exec\"]";
+        let extracted = extract_dockerfile_from_str("Dockerfile", content, &["echo"]);
+        assert_eq!(extracted.len(), 2, "Expected 2 commands: {extracted:?}");
+        assert_eq!(
+            extracted[0].extractor_id, "dockerfile.run",
+            "Shell form should have 'dockerfile.run' extractor_id"
+        );
+        assert_eq!(
+            extracted[1].extractor_id, "dockerfile.run.exec",
+            "Exec form should have 'dockerfile.run.exec' extractor_id"
+        );
+    }
+
+    #[test]
+    fn dockerfile_keyword_filtering_works() {
+        // Verify keyword filtering correctly limits extraction
+        let content = "FROM alpine\nRUN apt-get update\nRUN npm install\nRUN pip install";
+        let extracted = extract_dockerfile_from_str("Dockerfile", content, &["apt"]);
+        assert_eq!(
+            extracted.len(),
+            1,
+            "Only apt command should be extracted with 'apt' keyword: {extracted:?}"
+        );
+        assert!(
+            extracted[0].command.contains("apt"),
+            "Extracted command should contain 'apt': {extracted:?}"
+        );
+    }
+
+    #[test]
+    fn dockerfile_empty_keywords_extracts_all() {
+        // Empty keywords array should extract all RUN commands
+        let content = "FROM alpine\nRUN apt-get update\nRUN npm install\nRUN pip install";
+        let extracted = extract_dockerfile_from_str("Dockerfile", content, &[]);
+        assert_eq!(
+            extracted.len(),
+            3,
+            "All 3 RUN commands should be extracted with empty keywords: {extracted:?}"
+        );
     }
 
     // ------------------------------------------------------------------------
