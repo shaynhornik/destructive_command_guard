@@ -1059,6 +1059,150 @@ pub struct OverridesConfig {
     /// Additional patterns to block.
     #[serde(default)]
     pub block: Vec<BlockOverride>,
+
+    /// Simple allowlist format (backward compatible).
+    ///
+    /// Example in TOML:
+    /// ```toml
+    /// allowlist = ["npm run build", "cargo test"]
+    /// ```
+    #[serde(default)]
+    pub allowlist: Option<Vec<String>>,
+
+    /// Extended allowlist rules with path-specific conditions.
+    ///
+    /// Example in TOML:
+    /// ```toml
+    /// [[allowlist_rules]]
+    /// pattern = "rm -rf node_modules"
+    /// paths = ["/home/*/projects/*", "/workspace/*"]
+    /// comment = "Allow node_modules cleanup in project directories"
+    /// ```
+    #[serde(default)]
+    pub allowlist_rules: Option<Vec<AllowlistRule>>,
+}
+
+/// An extended allowlist rule with optional path conditions.
+///
+/// This supports context-aware allowlisting where rules can be scoped
+/// to specific directories or path patterns.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllowlistRule {
+    /// The pattern to allow (regex supported).
+    pub pattern: String,
+
+    /// Optional path patterns where this rule applies.
+    ///
+    /// If `None` or empty, the rule applies globally.
+    /// Supports glob patterns like `/home/*/projects/*`.
+    #[serde(default)]
+    pub paths: Option<Vec<String>>,
+
+    /// Optional comment explaining the rule.
+    #[serde(default)]
+    pub comment: Option<String>,
+
+    /// Optional expiration timestamp (ISO 8601 format).
+    ///
+    /// After this time, the rule is no longer active.
+    /// Example: "2024-06-01T00:00:00Z"
+    #[serde(default)]
+    pub expires: Option<String>,
+
+    /// Optional time-to-live duration in seconds.
+    ///
+    /// Alternative to `expires` for relative expiration.
+    /// Computed from first load time.
+    #[serde(default)]
+    pub ttl_seconds: Option<u64>,
+
+    /// Whether this is a session-only rule.
+    ///
+    /// Session rules are not persisted and expire when dcg restarts.
+    #[serde(default)]
+    pub session: Option<bool>,
+}
+
+impl Default for AllowlistRule {
+    fn default() -> Self {
+        Self {
+            pattern: String::new(),
+            paths: None,
+            comment: None,
+            expires: None,
+            ttl_seconds: None,
+            session: None,
+        }
+    }
+}
+
+impl AllowlistRule {
+    /// Check if this rule is currently active (not expired).
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        // Check expires timestamp
+        if let Some(expires_str) = &self.expires {
+            if let Ok(expires) = DateTime::parse_from_rfc3339(expires_str) {
+                let now = Utc::now();
+                if now >= expires {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Check if this rule applies globally (no path restrictions).
+    #[must_use]
+    pub fn is_global(&self) -> bool {
+        match &self.paths {
+            None => true,
+            Some(paths) => paths.is_empty() || paths.iter().any(|p| p == "*"),
+        }
+    }
+
+    /// Validate the rule.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Pattern is empty
+    /// - Paths contain invalid glob patterns
+    /// - Expires format is invalid
+    pub fn validate(&self) -> Result<(), String> {
+        // Pattern must be non-empty
+        if self.pattern.trim().is_empty() {
+            return Err("allowlist rule pattern must be non-empty".to_string());
+        }
+
+        // Validate expires format if present
+        if let Some(expires_str) = &self.expires {
+            if DateTime::parse_from_rfc3339(expires_str).is_err() {
+                return Err(format!(
+                    "invalid expires format '{}': expected ISO 8601 (e.g., 2024-06-01T00:00:00Z)",
+                    expires_str
+                ));
+            }
+        }
+
+        // Validate path patterns (basic check for common mistakes)
+        if let Some(paths) = &self.paths {
+            for path in paths {
+                if path.trim().is_empty() {
+                    return Err("allowlist rule path pattern must be non-empty".to_string());
+                }
+                // Check for obviously invalid patterns
+                if path.contains("**/**") {
+                    return Err(format!(
+                        "invalid glob pattern '{}': consecutive ** not allowed",
+                        path
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// An allow override - patterns that should be permitted.
@@ -1438,7 +1582,147 @@ impl OverridesConfig {
             }
         }
 
+        // Compile simple allowlist patterns (backward-compatible format)
+        if let Some(allowlist) = &self.allowlist {
+            for pattern in allowlist {
+                if pattern.trim().is_empty() {
+                    continue;
+                }
+                match CompiledRegex::new(pattern) {
+                    Ok(regex) => {
+                        compiled.allow.push(CompiledAllowOverride {
+                            regex,
+                            pattern: pattern.clone(),
+                            condition: ConditionCheck::Always,
+                        });
+                    }
+                    Err(e) => {
+                        compiled.invalid_patterns.push(InvalidPattern {
+                            pattern: pattern.clone(),
+                            error: e.clone(),
+                            kind: PatternKind::Allow,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Compile extended allowlist rules
+        if let Some(rules) = &self.allowlist_rules {
+            for rule in rules {
+                // Skip inactive (expired) rules
+                if !rule.is_active() {
+                    continue;
+                }
+
+                // Validate the rule - skip invalid ones but log the error
+                if let Err(e) = rule.validate() {
+                    compiled.invalid_patterns.push(InvalidPattern {
+                        pattern: rule.pattern.clone(),
+                        error: e,
+                        kind: PatternKind::Allow,
+                    });
+                    continue;
+                }
+
+                match CompiledRegex::new(&rule.pattern) {
+                    Ok(regex) => {
+                        compiled.allow.push(CompiledAllowOverride {
+                            regex,
+                            pattern: rule.pattern.clone(),
+                            condition: ConditionCheck::Always,
+                        });
+                    }
+                    Err(e) => {
+                        compiled.invalid_patterns.push(InvalidPattern {
+                            pattern: rule.pattern.clone(),
+                            error: e.clone(),
+                            kind: PatternKind::Allow,
+                        });
+                    }
+                }
+            }
+        }
+
         compiled
+    }
+
+    /// Load and merge all allowlist rules from both formats.
+    ///
+    /// This returns a unified list of `AllowlistRule` structs, converting
+    /// simple allowlist patterns to the extended format.
+    #[must_use]
+    pub fn load_allowlist(&self) -> Vec<AllowlistRule> {
+        let mut rules = Vec::new();
+
+        // Convert simple format to AllowlistRule
+        if let Some(simple) = &self.allowlist {
+            for pattern in simple {
+                if pattern.trim().is_empty() {
+                    continue;
+                }
+                rules.push(AllowlistRule {
+                    pattern: pattern.clone(),
+                    paths: None, // None means global
+                    ..Default::default()
+                });
+            }
+        }
+
+        // Add extended format rules
+        if let Some(extended) = &self.allowlist_rules {
+            for rule in extended {
+                // Only include active rules
+                if rule.is_active() {
+                    rules.push(rule.clone());
+                }
+            }
+        }
+
+        // Warn on duplicate patterns (log to stderr in debug builds)
+        #[cfg(debug_assertions)]
+        {
+            let mut seen = std::collections::HashSet::new();
+            for rule in &rules {
+                if !seen.insert(&rule.pattern) {
+                    eprintln!(
+                        "dcg: warning: duplicate allowlist pattern: {}",
+                        rule.pattern
+                    );
+                }
+            }
+        }
+
+        rules
+    }
+
+    /// Validate all allowlist rules.
+    ///
+    /// # Errors
+    ///
+    /// Returns a list of validation errors for invalid rules.
+    pub fn validate_allowlist(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+
+        // Validate simple patterns
+        if let Some(patterns) = &self.allowlist {
+            for (i, pattern) in patterns.iter().enumerate() {
+                if pattern.trim().is_empty() {
+                    errors.push(format!("allowlist[{}]: pattern must be non-empty", i));
+                }
+            }
+        }
+
+        // Validate extended rules
+        if let Some(rules) = &self.allowlist_rules {
+            for (i, rule) in rules.iter().enumerate() {
+                if let Err(e) = rule.validate() {
+                    errors.push(format!("allowlist_rules[{}]: {}", i, e));
+                }
+            }
+        }
+
+        errors
     }
 }
 
@@ -3270,6 +3554,7 @@ allow = false
         let overrides = OverridesConfig {
             allow: vec![AllowOverride::Simple("git reset --hard".to_string())],
             block: vec![],
+            ..Default::default()
         };
         let compiled = overrides.compile();
 
@@ -3287,6 +3572,7 @@ allow = false
                 pattern: "dangerous-command".to_string(),
                 reason: "This is dangerous!".to_string(),
             }],
+            ..Default::default()
         };
         let compiled = overrides.compile();
 
@@ -3307,6 +3593,7 @@ allow = false
                 pattern: "[also invalid".to_string(),
                 reason: "Won't compile".to_string(),
             }],
+            ..Default::default()
         };
         let compiled = overrides.compile();
 
@@ -3341,6 +3628,7 @@ allow = false
                 when: None,
             }],
             block: vec![],
+            ..Default::default()
         };
         let compiled = overrides.compile();
 
@@ -3356,6 +3644,7 @@ allow = false
                 r"kubectl delete namespace test-\d+".to_string(),
             )],
             block: vec![],
+            ..Default::default()
         };
         let compiled = overrides.compile();
 
@@ -3374,6 +3663,7 @@ allow = false
                 AllowOverride::Simple(r"test-\d+".to_string()),
             ],
             block: vec![],
+            ..Default::default()
         };
         let compiled = overrides.compile();
 
@@ -3405,6 +3695,7 @@ allow = false
                 pattern: r"(\w+)\s+\1".to_string(),
                 reason: "duplicate word".to_string(),
             }],
+            ..Default::default()
         };
         let compiled = overrides.compile();
 
@@ -3428,6 +3719,7 @@ allow = false
                 pattern: "test-command".to_string(),
                 reason: "Blocked!".to_string(),
             }],
+            ..Default::default()
         };
         let compiled = overrides.compile();
 
@@ -3467,6 +3759,7 @@ allow = false
                     reason: "Reason 2".to_string(),
                 },
             ],
+            ..Default::default()
         };
         let compiled = overrides.compile();
 
@@ -3477,6 +3770,325 @@ allow = false
         assert_eq!(compiled.check_block("block-1"), Some("Reason 1"));
         assert_eq!(compiled.check_block("block-2"), Some("Reason 2"));
         assert_eq!(compiled.check_block("block-3"), None);
+    }
+
+    // ========================================================================
+    // AllowlistRule and Extended Allowlist Tests (git_safety_guard-fvuf)
+    // ========================================================================
+
+    #[test]
+    fn test_allowlist_rule_validation_empty_pattern() {
+        let rule = AllowlistRule {
+            pattern: "".to_string(),
+            ..Default::default()
+        };
+        assert!(rule.validate().is_err());
+        assert!(rule.validate().unwrap_err().contains("non-empty"));
+    }
+
+    #[test]
+    fn test_allowlist_rule_validation_whitespace_pattern() {
+        let rule = AllowlistRule {
+            pattern: "   ".to_string(),
+            ..Default::default()
+        };
+        assert!(rule.validate().is_err());
+    }
+
+    #[test]
+    fn test_allowlist_rule_validation_valid_pattern() {
+        let rule = AllowlistRule {
+            pattern: "npm run build".to_string(),
+            paths: Some(vec!["/home/*/projects/*".to_string()]),
+            comment: Some("Allow builds".to_string()),
+            ..Default::default()
+        };
+        assert!(rule.validate().is_ok());
+    }
+
+    #[test]
+    fn test_allowlist_rule_validation_invalid_expires() {
+        let rule = AllowlistRule {
+            pattern: "test".to_string(),
+            expires: Some("not-a-date".to_string()),
+            ..Default::default()
+        };
+        assert!(rule.validate().is_err());
+        assert!(rule.validate().unwrap_err().contains("expires"));
+    }
+
+    #[test]
+    fn test_allowlist_rule_validation_valid_expires() {
+        let rule = AllowlistRule {
+            pattern: "test".to_string(),
+            expires: Some("2030-01-01T00:00:00Z".to_string()),
+            ..Default::default()
+        };
+        assert!(rule.validate().is_ok());
+    }
+
+    #[test]
+    fn test_allowlist_rule_is_active_no_expiry() {
+        let rule = AllowlistRule {
+            pattern: "test".to_string(),
+            ..Default::default()
+        };
+        assert!(rule.is_active());
+    }
+
+    #[test]
+    fn test_allowlist_rule_is_active_future_expiry() {
+        let rule = AllowlistRule {
+            pattern: "test".to_string(),
+            expires: Some("2030-01-01T00:00:00Z".to_string()),
+            ..Default::default()
+        };
+        assert!(rule.is_active());
+    }
+
+    #[test]
+    fn test_allowlist_rule_is_active_past_expiry() {
+        let rule = AllowlistRule {
+            pattern: "test".to_string(),
+            expires: Some("2020-01-01T00:00:00Z".to_string()),
+            ..Default::default()
+        };
+        assert!(!rule.is_active());
+    }
+
+    #[test]
+    fn test_allowlist_rule_is_global_no_paths() {
+        let rule = AllowlistRule {
+            pattern: "test".to_string(),
+            paths: None,
+            ..Default::default()
+        };
+        assert!(rule.is_global());
+    }
+
+    #[test]
+    fn test_allowlist_rule_is_global_empty_paths() {
+        let rule = AllowlistRule {
+            pattern: "test".to_string(),
+            paths: Some(vec![]),
+            ..Default::default()
+        };
+        assert!(rule.is_global());
+    }
+
+    #[test]
+    fn test_allowlist_rule_is_global_wildcard() {
+        let rule = AllowlistRule {
+            pattern: "test".to_string(),
+            paths: Some(vec!["*".to_string()]),
+            ..Default::default()
+        };
+        assert!(rule.is_global());
+    }
+
+    #[test]
+    fn test_allowlist_rule_not_global_with_paths() {
+        let rule = AllowlistRule {
+            pattern: "test".to_string(),
+            paths: Some(vec!["/home/user/*".to_string()]),
+            ..Default::default()
+        };
+        assert!(!rule.is_global());
+    }
+
+    #[test]
+    fn test_compile_simple_allowlist() {
+        let overrides = OverridesConfig {
+            allowlist: Some(vec![
+                "npm run build".to_string(),
+                "cargo test".to_string(),
+            ]),
+            ..Default::default()
+        };
+        let compiled = overrides.compile();
+
+        assert_eq!(compiled.allow.len(), 2);
+        assert!(compiled.invalid_patterns.is_empty());
+        assert!(compiled.check_allow("npm run build"));
+        assert!(compiled.check_allow("cargo test"));
+        assert!(!compiled.check_allow("rm -rf"));
+    }
+
+    #[test]
+    fn test_compile_allowlist_rules() {
+        let overrides = OverridesConfig {
+            allowlist_rules: Some(vec![
+                AllowlistRule {
+                    pattern: "rm -rf node_modules".to_string(),
+                    paths: Some(vec!["/home/*/projects/*".to_string()]),
+                    comment: Some("Allow node_modules cleanup".to_string()),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        };
+        let compiled = overrides.compile();
+
+        assert_eq!(compiled.allow.len(), 1);
+        assert!(compiled.invalid_patterns.is_empty());
+        assert!(compiled.check_allow("rm -rf node_modules"));
+    }
+
+    #[test]
+    fn test_compile_both_allowlist_formats() {
+        let overrides = OverridesConfig {
+            allowlist: Some(vec!["npm run build".to_string()]),
+            allowlist_rules: Some(vec![
+                AllowlistRule {
+                    pattern: "cargo test".to_string(),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        };
+        let compiled = overrides.compile();
+
+        // Both formats should be merged
+        assert_eq!(compiled.allow.len(), 2);
+        assert!(compiled.check_allow("npm run build"));
+        assert!(compiled.check_allow("cargo test"));
+    }
+
+    #[test]
+    fn test_compile_skips_expired_rules() {
+        let overrides = OverridesConfig {
+            allowlist_rules: Some(vec![
+                AllowlistRule {
+                    pattern: "active-command".to_string(),
+                    expires: Some("2030-01-01T00:00:00Z".to_string()),
+                    ..Default::default()
+                },
+                AllowlistRule {
+                    pattern: "expired-command".to_string(),
+                    expires: Some("2020-01-01T00:00:00Z".to_string()),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        };
+        let compiled = overrides.compile();
+
+        // Only the active rule should be compiled
+        assert_eq!(compiled.allow.len(), 1);
+        assert!(compiled.check_allow("active-command"));
+        assert!(!compiled.check_allow("expired-command"));
+    }
+
+    #[test]
+    fn test_compile_skips_empty_patterns() {
+        let overrides = OverridesConfig {
+            allowlist: Some(vec![
+                "valid-pattern".to_string(),
+                "".to_string(),
+                "   ".to_string(),
+            ]),
+            ..Default::default()
+        };
+        let compiled = overrides.compile();
+
+        // Only valid patterns should be compiled
+        assert_eq!(compiled.allow.len(), 1);
+        assert!(compiled.check_allow("valid-pattern"));
+    }
+
+    #[test]
+    fn test_load_allowlist_merges_formats() {
+        let overrides = OverridesConfig {
+            allowlist: Some(vec!["simple-pattern".to_string()]),
+            allowlist_rules: Some(vec![
+                AllowlistRule {
+                    pattern: "extended-pattern".to_string(),
+                    paths: Some(vec!["/home/*".to_string()]),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        };
+        let rules = overrides.load_allowlist();
+
+        assert_eq!(rules.len(), 2);
+
+        // Simple pattern should be converted to AllowlistRule with no paths
+        assert_eq!(rules[0].pattern, "simple-pattern");
+        assert!(rules[0].paths.is_none());
+
+        // Extended pattern should preserve its paths
+        assert_eq!(rules[1].pattern, "extended-pattern");
+        assert!(rules[1].paths.is_some());
+    }
+
+    #[test]
+    fn test_load_allowlist_filters_expired() {
+        let overrides = OverridesConfig {
+            allowlist_rules: Some(vec![
+                AllowlistRule {
+                    pattern: "active".to_string(),
+                    ..Default::default()
+                },
+                AllowlistRule {
+                    pattern: "expired".to_string(),
+                    expires: Some("2020-01-01T00:00:00Z".to_string()),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        };
+        let rules = overrides.load_allowlist();
+
+        // Only active rules should be returned
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].pattern, "active");
+    }
+
+    #[test]
+    fn test_validate_allowlist_empty_pattern() {
+        let overrides = OverridesConfig {
+            allowlist: Some(vec!["".to_string()]),
+            ..Default::default()
+        };
+        let errors = overrides.validate_allowlist();
+
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("non-empty"));
+    }
+
+    #[test]
+    fn test_validate_allowlist_invalid_rule() {
+        let overrides = OverridesConfig {
+            allowlist_rules: Some(vec![
+                AllowlistRule {
+                    pattern: "".to_string(),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        };
+        let errors = overrides.validate_allowlist();
+
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("allowlist_rules[0]"));
+    }
+
+    #[test]
+    fn test_validate_allowlist_valid() {
+        let overrides = OverridesConfig {
+            allowlist: Some(vec!["valid-pattern".to_string()]),
+            allowlist_rules: Some(vec![
+                AllowlistRule {
+                    pattern: "also-valid".to_string(),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        };
+        let errors = overrides.validate_allowlist();
+
+        assert!(errors.is_empty());
     }
 
     // ========================================================================
