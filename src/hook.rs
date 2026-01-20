@@ -349,10 +349,8 @@ pub fn print_colorful_warning(
         }
     }
 
-    let mut denial =
-        DenialBox::new(command, span, pattern_display, theme_severity).with_alternatives(
-            alternatives,
-        );
+    let mut denial = DenialBox::new(command, span, pattern_display, theme_severity)
+        .with_alternatives(alternatives);
 
     denial = denial.with_explanation(explanation_text);
 
