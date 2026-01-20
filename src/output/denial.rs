@@ -954,12 +954,14 @@ mod tests {
         );
 
         let output = denial.render(&theme);
+        let clean_output = strip_ansi_codes(&output);
 
         // Minimal style should still contain key elements
-        assert!(output.contains("BLOCKED"));
-        assert!(output.contains("git push --force"));
-        assert!(output.contains("Pattern: force_push"));
-        assert!(output.contains("Pack: core.git"));
+        assert!(clean_output.contains("BLOCKED"));
+        // Highlighting might split the command with ANSI codes, but clean_output handles that
+        assert!(clean_output.contains("git push --force"));
+        assert!(clean_output.contains("Pattern: force_push"));
+        assert!(clean_output.contains("Pack: core.git"));
     }
 
     #[test]
