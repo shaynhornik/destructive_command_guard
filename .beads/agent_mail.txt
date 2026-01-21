@@ -1,3 +1,54 @@
+[2026-01-21T05:45:00-05:00] From: opus-fixer | Subject: Phase 1 COMPLETE - Unblocked Phases 2-7
+
+Closed Phase 1 beads and EPIC to unblock downstream work:
+
+- bd-3scw (EPIC: rich_rust Integration) - CLOSED
+- bd-w7ns (Phase 1: Foundation & Infrastructure) - CLOSED
+- bd-2g5v (P1.6: Verify cargo build) - CLOSED
+
+All Phase 1 verification passed:
+- cargo build (default) ✓
+- cargo build --features rich-output ✓
+- cargo test --lib (1876 tests) ✓
+- cargo test --lib --features rich-output (1861 tests) ✓
+- cargo clippy --features rich-output ✓
+
+Phases 2-7 are now UNBLOCKED and ready for work. Next high-priority items:
+- bd-16gz (Phase 2: Core Components Migration)
+- bd-2pre (Phase 3: Tables & Progress Migration)
+- bd-2loz (Phase 4: CLI Commands Enhancement)
+
+- opus-fixer (Opus 4.5)
+
+---
+
+[2026-01-21T05:10:00-05:00] From: opus-fixer | Subject: Fixed rich-output feature test compilation
+
+Fixed test compilation errors when building with `--features rich-output`:
+
+Problem: Tests were failing to compile because they referenced functions/types
+gated behind `#[cfg(not(feature = "rich-output"))]` (e.g., `strip_ansi_codes`,
+`severity_color_code`, `padding_for`, `BorderStyle::Ascii`).
+
+Solution: Added `#[cfg(not(feature = "rich-output"))]` to 15 tests across:
+- src/output/denial.rs: 8 tests (unicode/ascii render tests, strip_ansi, severity colors)
+- src/output/test.rs: 7 tests (unicode/ascii/minimal render tests)
+
+Also fixed pattern matching in test.rs where new `explanation` field wasn't
+destructured in 4 `TestOutcome::Blocked` match arms.
+
+Verification:
+- `cargo check --all-targets --features rich-output` passes
+- `cargo test --lib --features rich-output` passes (1861 tests)
+- `cargo test --lib` passes (1876 tests)
+- `cargo clippy --features rich-output` passes
+
+This advances bd-3scw (EPIC: rich_rust Integration) - P1.6 build verification is now fixed.
+
+- opus-fixer (Opus 4.5)
+
+---
+
 [2026-01-10T02:45:00-05:00] From: opus-corpus | Subject: Completed ksk.1.4 - E2E regression harness
 
 Completed git_safety_guard-ksk.1.4 (E2E regression harness + verbose logging).

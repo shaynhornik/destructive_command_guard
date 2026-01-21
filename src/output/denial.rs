@@ -807,6 +807,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "rich-output"))]
     fn test_denial_box_unicode_render() {
         let span = HighlightSpan::new(0, 10);
         let theme = Theme::default();
@@ -826,6 +827,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "rich-output"))]
     fn test_denial_box_ascii_render() {
         let span = HighlightSpan::new(0, 10);
         let theme = Theme {
@@ -849,6 +851,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "rich-output"))]
     fn test_denial_box_no_color_still_uses_ascii_box() {
         let span = HighlightSpan::new(0, 10);
         let theme = Theme::no_color();
@@ -870,6 +873,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "rich-output"))]
     fn test_denial_box_unicode_without_colors_strips_ansi() {
         let span = HighlightSpan::new(0, 10);
         let theme = Theme::default().without_colors();
