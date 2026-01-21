@@ -41,8 +41,9 @@ pub const MAX_TIMEOUT_SECONDS: u64 = 30;
 /// Minimum timeout in seconds.
 pub const MIN_TIMEOUT_SECONDS: u64 = 1;
 
-/// Character set for verification codes (lowercase alphanumeric for easy typing).
-const CODE_CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+/// Character set for verification codes (lowercase, unambiguous).
+/// Excludes visually confusing characters: i, l, o, 0, 1.
+const CODE_CHARSET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
 
 /// Result of an interactive prompt session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,6 +194,14 @@ pub fn generate_verification_code(length: usize) -> String {
         .collect()
 }
 
+/// Validate a user-provided verification code.
+///
+/// Comparison is case-insensitive and ignores leading/trailing whitespace.
+#[must_use]
+pub fn validate_code(input: &str, expected: &str) -> bool {
+    input.trim().eq_ignore_ascii_case(expected)
+}
+
 /// Check if interactive mode is available in the current environment.
 ///
 /// Returns `Ok(())` if interactive mode can be used, or `Err(reason)` if not.
@@ -267,7 +276,7 @@ pub fn run_interactive_prompt(
     // Read input with timeout
     match read_input_with_timeout(timeout) {
         Ok(input) => {
-            let input = input.trim().to_lowercase();
+            let input = input.trim();
 
             // Empty input = cancelled
             if input.is_empty() {
@@ -275,7 +284,7 @@ pub fn run_interactive_prompt(
             }
 
             // Check verification code (case-insensitive)
-            if input == code.to_lowercase() {
+            if validate_code(input, &code) {
                 // Code correct - show scope selection
                 match select_allowlist_scope() {
                     Ok(scope) => InteractiveResult::AllowlistRequested(scope),
@@ -664,11 +673,26 @@ mod tests {
         let codes: Vec<String> = (0..10).map(|_| generate_verification_code(4)).collect();
         let unique_count = codes.iter().collect::<std::collections::HashSet<_>>().len();
 
-        // With 36^4 = 1,679,616 possible codes, getting duplicates in 10 tries is unlikely
+        // With 31^4 = 923,521 possible codes, getting duplicates in 10 tries is unlikely
         assert!(
             unique_count > 5,
             "Generated codes should be mostly unique, got {unique_count} unique out of 10"
         );
+    }
+
+    #[test]
+    fn test_code_charset_excludes_ambiguous_chars() {
+        let charset = std::str::from_utf8(CODE_CHARSET).unwrap();
+        for ch in ['i', 'l', 'o', '0', '1'] {
+            assert!(!charset.contains(ch), "charset should not contain '{ch}'");
+        }
+    }
+
+    #[test]
+    fn test_validate_code_case_insensitive() {
+        assert!(validate_code("AbC", "abc"));
+        assert!(validate_code(" abc ", "aBc"));
+        assert!(!validate_code("abcd", "abc"));
     }
 
     #[test]

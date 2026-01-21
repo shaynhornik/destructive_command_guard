@@ -335,6 +335,176 @@ pub struct HistoryStats {
     pub trends: Option<StatsTrends>,
 }
 
+// ============================================================================
+// Suggestion Analysis Types
+// ============================================================================
+
+/// Command that was blocked frequently in a time window.
+#[derive(Debug, Clone, Serialize)]
+pub struct FrequentBlock {
+    /// The blocked command.
+    pub command: String,
+    /// Number of times the command was blocked.
+    pub block_count: u64,
+    /// Most recent timestamp when the command was blocked.
+    pub last_seen: DateTime<Utc>,
+}
+
+/// Command blocks clustered by working directory.
+#[derive(Debug, Clone, Serialize)]
+pub struct PathCluster {
+    /// The blocked command.
+    pub command: String,
+    /// Working directory where the command was blocked.
+    pub working_dir: String,
+    /// Number of times the command was blocked in this directory.
+    pub block_count: u64,
+}
+
+/// Command that was manually bypassed (allow-once) and may be a suggestion candidate.
+#[derive(Debug, Clone, Serialize)]
+pub struct SuggestionCandidate {
+    /// The command that was bypassed.
+    pub command: String,
+    /// Number of times the command was bypassed.
+    pub bypass_count: u64,
+    /// Most recent timestamp when the command was bypassed.
+    pub last_seen: DateTime<Utc>,
+}
+
+/// Helper for history analysis queries used by suggestion heuristics.
+pub struct HistoryAnalyzer<'a> {
+    conn: &'a Connection,
+}
+
+impl<'a> HistoryAnalyzer<'a> {
+    /// Create a new analyzer for the provided history database.
+    #[must_use]
+    pub fn new(db: &'a HistoryDb) -> Self {
+        Self { conn: &db.conn }
+    }
+
+    /// Return commands blocked at least `min_count` times in the last `days` days.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    pub fn get_frequent_blocks(
+        &self,
+        days: u32,
+        min_count: u32,
+    ) -> Result<Vec<FrequentBlock>, HistoryError> {
+        let days_i64 = i64::from(days);
+        let since = Utc::now() - Duration::days(days_i64);
+        let since_ts = format_timestamp(since);
+        let min_count_i64 = i64::from(min_count);
+
+        let mut stmt = self.conn.prepare(
+            "SELECT command, COUNT(*) as block_count, MAX(timestamp) as last_seen
+             FROM commands
+             WHERE outcome = 'deny' AND timestamp >= ?1
+             GROUP BY command
+             HAVING COUNT(*) >= ?2
+             ORDER BY block_count DESC, command ASC",
+        )?;
+        let rows = stmt.query_map(params![&since_ts, min_count_i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+
+        let mut blocks = Vec::new();
+        for row in rows {
+            let (command, block_count, last_seen_str) = row?;
+            let last_seen = DateTime::parse_from_rfc3339(&last_seen_str)
+                .map_or_else(|_| Utc::now(), |dt| dt.with_timezone(&Utc));
+            blocks.push(FrequentBlock {
+                command,
+                block_count: u64::try_from(block_count).unwrap_or(0),
+                last_seen,
+            });
+        }
+
+        Ok(blocks)
+    }
+
+    /// Return command + working directory clusters blocked at least `min_count` times.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    pub fn get_path_clusters(&self, min_count: u32) -> Result<Vec<PathCluster>, HistoryError> {
+        let min_count_i64 = i64::from(min_count);
+        let mut stmt = self.conn.prepare(
+            "SELECT command, working_dir, COUNT(*) as block_count
+             FROM commands
+             WHERE outcome = 'deny'
+             GROUP BY command, working_dir
+             HAVING COUNT(*) >= ?1
+             ORDER BY block_count DESC, command ASC, working_dir ASC",
+        )?;
+        let rows = stmt.query_map(params![min_count_i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?;
+
+        let mut clusters = Vec::new();
+        for row in rows {
+            let (command, working_dir, block_count) = row?;
+            clusters.push(PathCluster {
+                command,
+                working_dir,
+                block_count: u64::try_from(block_count).unwrap_or(0),
+            });
+        }
+
+        Ok(clusters)
+    }
+
+    /// Return commands that were manually bypassed (allow-once).
+    ///
+    /// This approximates "manual allows" using the `bypass` outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    pub fn get_suggestion_candidates(&self) -> Result<Vec<SuggestionCandidate>, HistoryError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT command, COUNT(*) as bypass_count, MAX(timestamp) as last_seen
+             FROM commands
+             WHERE outcome = 'bypass'
+             GROUP BY command
+             ORDER BY bypass_count DESC, command ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+
+        let mut candidates = Vec::new();
+        for row in rows {
+            let (command, bypass_count, last_seen_str) = row?;
+            let last_seen = DateTime::parse_from_rfc3339(&last_seen_str)
+                .map_or_else(|_| Utc::now(), |dt| dt.with_timezone(&Utc));
+            candidates.push(SuggestionCandidate {
+                command,
+                bypass_count: u64::try_from(bypass_count).unwrap_or(0),
+                last_seen,
+            });
+        }
+
+        Ok(candidates)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct StatsSnapshot {
     total_commands: u64,
@@ -3075,6 +3245,24 @@ mod tests {
         db.log_command(&entry).unwrap();
     }
 
+    fn insert_command(
+        db: &HistoryDb,
+        command: &str,
+        outcome: Outcome,
+        working_dir: &str,
+        timestamp: DateTime<Utc>,
+    ) {
+        let entry = CommandEntry {
+            timestamp,
+            agent_type: "claude_code".to_string(),
+            working_dir: working_dir.to_string(),
+            command: command.to_string(),
+            outcome,
+            ..Default::default()
+        };
+        db.log_command(&entry).unwrap();
+    }
+
     fn create_test_db_with_outcomes(allow: usize, deny: usize, warn: usize) -> HistoryDb {
         let db = HistoryDb::open_in_memory().unwrap();
         let now = Utc::now() - Duration::days(1);
@@ -4045,6 +4233,63 @@ mod tests {
             })
             .unwrap();
         assert_eq!(entries.len(), 5);
+    }
+
+    // ========================================================================
+    // History Analyzer Tests
+    // ========================================================================
+
+    #[test]
+    fn test_history_analyzer_frequent_blocks() {
+        let db = HistoryDb::open_in_memory().unwrap();
+        let now = Utc::now() - Duration::days(1);
+
+        for _ in 0..3 {
+            insert_command(&db, "rm -rf ./build", Outcome::Deny, "/project/a", now);
+        }
+        insert_command(&db, "git reset --hard", Outcome::Deny, "/project/a", now);
+
+        let analyzer = HistoryAnalyzer::new(&db);
+        let results = analyzer.get_frequent_blocks(30, 2).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].command, "rm -rf ./build");
+        assert_eq!(results[0].block_count, 3);
+    }
+
+    #[test]
+    fn test_history_analyzer_path_clusters() {
+        let db = HistoryDb::open_in_memory().unwrap();
+        let now = Utc::now() - Duration::days(1);
+
+        insert_command(&db, "rm -rf ./build", Outcome::Deny, "/project/a", now);
+        insert_command(&db, "rm -rf ./build", Outcome::Deny, "/project/a", now);
+        insert_command(&db, "rm -rf ./build", Outcome::Deny, "/project/b", now);
+
+        let analyzer = HistoryAnalyzer::new(&db);
+        let results = analyzer.get_path_clusters(2).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].command, "rm -rf ./build");
+        assert_eq!(results[0].working_dir, "/project/a");
+        assert_eq!(results[0].block_count, 2);
+    }
+
+    #[test]
+    fn test_history_analyzer_suggestion_candidates() {
+        let db = HistoryDb::open_in_memory().unwrap();
+        let now = Utc::now() - Duration::days(1);
+
+        insert_command(&db, "git clean -fd", Outcome::Bypass, "/project/a", now);
+        insert_command(&db, "git clean -fd", Outcome::Bypass, "/project/a", now);
+        insert_command(&db, "rm -rf ./tmp", Outcome::Bypass, "/project/b", now);
+
+        let analyzer = HistoryAnalyzer::new(&db);
+        let results = analyzer.get_suggestion_candidates().unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].command, "git clean -fd");
+        assert_eq!(results[0].bypass_count, 2);
     }
 
     // ========================================================================
