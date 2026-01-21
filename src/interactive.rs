@@ -6,9 +6,8 @@
 //!
 //! # Security Model
 //!
-//! Interactive mode uses dual-factor verification:
-//! 1. **Random verification code**: 4-character alphanumeric code that changes each time
-//! 2. **Timeout constraint**: User must respond within 5 seconds
+//! Interactive mode defaults to a random verification code + timeout, and can
+//! be configured to use other verification methods when explicitly enabled.
 //!
 //! This combination prevents automated bypass by AI agents while remaining usable for humans.
 //!
@@ -20,6 +19,7 @@
 
 use colored::Colorize;
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::time::{Duration, Instant};
 
@@ -44,6 +44,24 @@ pub const MIN_TIMEOUT_SECONDS: u64 = 1;
 /// Character set for verification codes (lowercase, unambiguous).
 /// Excludes visually confusing characters: i, l, o, 0, 1.
 const CODE_CHARSET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
+
+/// Verification method for interactive prompts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VerificationMethod {
+    /// Random verification code (default).
+    Code,
+    /// Retype the full command.
+    Command,
+    /// No verification (least secure).
+    None,
+}
+
+impl Default for VerificationMethod {
+    fn default() -> Self {
+        Self::Code
+    }
+}
 
 /// Result of an interactive prompt session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +94,9 @@ pub enum NotAvailableReason {
     /// Interactive mode is disabled in configuration.
     Disabled,
 
+    /// Required environment variable is not set.
+    MissingEnv(String),
+
     /// Terminal environment is not suitable (TERM=dumb, etc.).
     UnsuitableTerminal,
 }
@@ -86,6 +107,10 @@ impl std::fmt::Display for NotAvailableReason {
             Self::NotTty => write!(f, "stdin is not a terminal (TTY)"),
             Self::CiEnvironment => write!(f, "running in CI environment"),
             Self::Disabled => write!(f, "interactive mode is disabled in configuration"),
+            Self::MissingEnv(var) => write!(
+                f,
+                "required environment variable '{var}' is not set"
+            ),
             Self::UnsuitableTerminal => write!(f, "terminal environment is not suitable"),
         }
     }
@@ -119,10 +144,13 @@ impl std::fmt::Display for AllowlistScope {
 }
 
 /// Configuration for interactive mode.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InteractiveConfig {
     /// Whether interactive mode is enabled.
     pub enabled: bool,
+
+    /// Verification method ("code", "command", "none").
+    pub verification: VerificationMethod,
 
     /// Timeout in seconds for user response.
     pub timeout_seconds: u64,
@@ -135,16 +163,25 @@ pub struct InteractiveConfig {
 
     /// Whether to allow fallback when not a TTY (always block in that case).
     pub allow_non_tty_fallback: bool,
+
+    /// Disable interactive mode in CI environments.
+    pub disable_in_ci: bool,
+
+    /// Require this env var to be set to enable interactive mode.
+    pub require_env: Option<String>,
 }
 
 impl Default for InteractiveConfig {
     fn default() -> Self {
         Self {
             enabled: false, // Disabled by default for safety
+            verification: VerificationMethod::Code,
             timeout_seconds: DEFAULT_TIMEOUT_SECONDS,
             code_length: DEFAULT_CODE_LENGTH,
             max_attempts: 3,
             allow_non_tty_fallback: true,
+            disable_in_ci: true,
+            require_env: None,
         }
     }
 }
@@ -216,6 +253,12 @@ pub fn check_interactive_available(config: &InteractiveConfig) -> Result<(), Not
         return Err(NotAvailableReason::Disabled);
     }
 
+    if let Some(var) = config.require_env.as_ref() {
+        if std::env::var(var).is_err() {
+            return Err(NotAvailableReason::MissingEnv(var.clone()));
+        }
+    }
+
     // Critical: Check if stdin is a TTY
     // If not, we're likely receiving piped input from an AI agent
     if !io::stdin().is_terminal() {
@@ -223,7 +266,7 @@ pub fn check_interactive_available(config: &InteractiveConfig) -> Result<(), Not
     }
 
     // Check for CI environment
-    if std::env::var("CI").is_ok() {
+    if config.disable_in_ci && is_ci_environment() {
         return Err(NotAvailableReason::CiEnvironment);
     }
 
@@ -233,6 +276,18 @@ pub fn check_interactive_available(config: &InteractiveConfig) -> Result<(), Not
     }
 
     Ok(())
+}
+
+fn is_ci_environment() -> bool {
+    [
+        "CI",
+        "GITHUB_ACTIONS",
+        "GITLAB_CI",
+        "JENKINS",
+        "TRAVIS",
+    ]
+    .iter()
+    .any(|var| std::env::var(var).is_ok())
 }
 
 /// Display the interactive prompt and wait for user input.
@@ -267,35 +322,91 @@ pub fn run_interactive_prompt(
         return InteractiveResult::NotAvailable(reason);
     }
 
-    let code = generate_verification_code(config.effective_code_length());
     let timeout = config.timeout();
 
-    // Display the prompt
-    display_prompt(command, reason, rule_id, &code, timeout);
+    match config.verification {
+        VerificationMethod::Code => {
+            let code = generate_verification_code(config.effective_code_length());
+            display_prompt(
+                command,
+                reason,
+                rule_id,
+                VerificationMethod::Code,
+                Some(&code),
+                timeout,
+            );
 
-    // Read input with timeout
-    match read_input_with_timeout(timeout) {
-        Ok(input) => {
-            let input = input.trim();
+            // Read input with timeout
+            match read_input_with_timeout(timeout) {
+                Ok(input) => {
+                    let input = input.trim();
 
-            // Empty input = cancelled
-            if input.is_empty() {
-                return InteractiveResult::Cancelled;
-            }
+                    // Empty input = cancelled
+                    if input.is_empty() {
+                        return InteractiveResult::Cancelled;
+                    }
 
-            // Check verification code (case-insensitive)
-            if validate_code(input, &code) {
-                // Code correct - show scope selection
-                match select_allowlist_scope() {
-                    Ok(scope) => InteractiveResult::AllowlistRequested(scope),
-                    Err(_) => InteractiveResult::Cancelled,
+                    // Check verification code (case-insensitive)
+                    if validate_code(input, &code) {
+                        // Code correct - show scope selection
+                        match select_allowlist_scope() {
+                            Ok(scope) => InteractiveResult::AllowlistRequested(scope),
+                            Err(_) => InteractiveResult::Cancelled,
+                        }
+                    } else {
+                        InteractiveResult::InvalidCode
+                    }
                 }
-            } else {
-                InteractiveResult::InvalidCode
+                Err(InputError::Timeout) => InteractiveResult::Timeout,
+                Err(InputError::Io(_) | InputError::Interrupted) => InteractiveResult::Cancelled,
             }
         }
-        Err(InputError::Timeout) => InteractiveResult::Timeout,
-        Err(InputError::Io(_) | InputError::Interrupted) => InteractiveResult::Cancelled,
+        VerificationMethod::Command => {
+            display_prompt(
+                command,
+                reason,
+                rule_id,
+                VerificationMethod::Command,
+                None,
+                timeout,
+            );
+
+            match read_input_with_timeout(timeout) {
+                Ok(input) => {
+                    let input = input.trim();
+
+                    if input.is_empty() {
+                        return InteractiveResult::Cancelled;
+                    }
+
+                    if input == command {
+                        match select_allowlist_scope() {
+                            Ok(scope) => InteractiveResult::AllowlistRequested(scope),
+                            Err(_) => InteractiveResult::Cancelled,
+                        }
+                    } else {
+                        InteractiveResult::InvalidCode
+                    }
+                }
+                Err(InputError::Timeout) => InteractiveResult::Timeout,
+                Err(InputError::Io(_) | InputError::Interrupted) => InteractiveResult::Cancelled,
+            }
+        }
+        VerificationMethod::None => {
+            display_prompt(
+                command,
+                reason,
+                rule_id,
+                VerificationMethod::None,
+                None,
+                timeout,
+            );
+
+            match select_allowlist_scope() {
+                Ok(scope) => InteractiveResult::AllowlistRequested(scope),
+                Err(_) => InteractiveResult::Cancelled,
+            }
+        }
     }
 }
 
@@ -308,7 +419,8 @@ fn display_prompt(
     command: &str,
     reason: &str,
     rule_id: Option<&str>,
-    code: &str,
+    verification: VerificationMethod,
+    code: Option<&str>,
     timeout: Duration,
 ) {
     let stderr = io::stderr();
@@ -465,31 +577,71 @@ fn display_prompt(
         "\u{2524}".red()
     );
 
-    // Verification prompt
-    let verify_prefix = "  To proceed, type: ";
-    let verify_visible_len = verify_prefix.len() + code.len();
-    let verify_padding = WIDTH.saturating_sub(verify_visible_len);
-    let _ = writeln!(
-        handle,
-        "{}{}{}{}{}",
-        "\u{2502}".red(),
-        verify_prefix.white(),
-        code.bright_yellow().bold(),
-        " ".repeat(verify_padding),
-        "\u{2502}".red()
-    );
+    let mut show_input_prompt = true;
 
-    // Timeout indicator
-    let timeout_secs = timeout.as_secs();
-    let timeout_line = format!("  ({timeout_secs} seconds remaining)");
-    let _ = writeln!(
-        handle,
-        "{}{}{}{}",
-        "\u{2502}".red(),
-        timeout_line.bright_black(),
-        " ".repeat(WIDTH.saturating_sub(timeout_line.chars().count())),
-        "\u{2502}".red()
-    );
+    match verification {
+        VerificationMethod::Code => {
+            let code = code.unwrap_or_default();
+            let verify_prefix = "  To proceed, type: ";
+            let verify_visible_len = verify_prefix.len() + code.len();
+            let verify_padding = WIDTH.saturating_sub(verify_visible_len);
+            let _ = writeln!(
+                handle,
+                "{}{}{}{}{}",
+                "\u{2502}".red(),
+                verify_prefix.white(),
+                code.bright_yellow().bold(),
+                " ".repeat(verify_padding),
+                "\u{2502}".red()
+            );
+
+            // Timeout indicator
+            let timeout_secs = timeout.as_secs();
+            let timeout_line = format!("  ({timeout_secs} seconds remaining)");
+            let _ = writeln!(
+                handle,
+                "{}{}{}{}",
+                "\u{2502}".red(),
+                timeout_line.bright_black(),
+                " ".repeat(WIDTH.saturating_sub(timeout_line.chars().count())),
+                "\u{2502}".red()
+            );
+        }
+        VerificationMethod::Command => {
+            let verify_line = "  To proceed, retype the full command:";
+            let _ = writeln!(
+                handle,
+                "{}{}{}{}",
+                "\u{2502}".red(),
+                verify_line.white(),
+                " ".repeat(WIDTH.saturating_sub(verify_line.chars().count())),
+                "\u{2502}".red()
+            );
+
+            let timeout_secs = timeout.as_secs();
+            let timeout_line = format!("  ({timeout_secs} seconds remaining)");
+            let _ = writeln!(
+                handle,
+                "{}{}{}{}",
+                "\u{2502}".red(),
+                timeout_line.bright_black(),
+                " ".repeat(WIDTH.saturating_sub(timeout_line.chars().count())),
+                "\u{2502}".red()
+            );
+        }
+        VerificationMethod::None => {
+            let verify_line = "  Verification disabled (least secure).";
+            let _ = writeln!(
+                handle,
+                "{}{}{}{}",
+                "\u{2502}".red(),
+                verify_line.bright_black(),
+                " ".repeat(WIDTH.saturating_sub(verify_line.chars().count())),
+                "\u{2502}".red()
+            );
+            show_input_prompt = false;
+        }
+    }
 
     // Bottom border
     let _ = writeln!(
@@ -500,9 +652,11 @@ fn display_prompt(
         "\u{256f}".red()
     );
 
-    // Input prompt
-    let _ = write!(handle, "{} ", ">".green().bold());
-    let _ = handle.flush();
+    if show_input_prompt {
+        // Input prompt
+        let _ = write!(handle, "{} ", ">".green().bold());
+        let _ = handle.flush();
+    }
 }
 
 /// Error type for input reading.
@@ -626,6 +780,13 @@ pub fn print_not_available_message(reason: &NotAvailableReason) {
             "{}   Run dcg in an interactive terminal to use this feature.",
             " ".repeat(5)
         );
+    } else if let NotAvailableReason::MissingEnv(var) = reason {
+        let _ = writeln!(
+            handle,
+            "{}   Set {} to enable interactive prompts.",
+            " ".repeat(5),
+            var
+        );
     }
 }
 
@@ -699,10 +860,13 @@ mod tests {
     fn test_interactive_config_defaults() {
         let config = InteractiveConfig::default();
         assert!(!config.enabled);
+        assert_eq!(config.verification, VerificationMethod::Code);
         assert_eq!(config.timeout_seconds, DEFAULT_TIMEOUT_SECONDS);
         assert_eq!(config.code_length, DEFAULT_CODE_LENGTH);
         assert_eq!(config.max_attempts, 3);
         assert!(config.allow_non_tty_fallback);
+        assert!(config.disable_in_ci);
+        assert!(config.require_env.is_none());
     }
 
     #[test]
@@ -750,6 +914,10 @@ mod tests {
         assert_eq!(
             NotAvailableReason::Disabled.to_string(),
             "interactive mode is disabled in configuration"
+        );
+        assert_eq!(
+            NotAvailableReason::MissingEnv("DCG_INTERACTIVE".to_string()).to_string(),
+            "required environment variable 'DCG_INTERACTIVE' is not set"
         );
         assert_eq!(
             NotAvailableReason::UnsuitableTerminal.to_string(),

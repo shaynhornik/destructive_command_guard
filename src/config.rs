@@ -8,6 +8,7 @@
 //! 5. Compiled defaults (lowest priority)
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use crate::interactive::{InteractiveConfig, VerificationMethod};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::env;
@@ -69,6 +70,9 @@ pub struct Config {
     /// Command history configuration.
     pub history: HistoryConfig,
 
+    /// Interactive prompt configuration.
+    pub interactive: InteractiveConfig,
+
     /// Git branch-aware strictness configuration.
     pub git_awareness: GitAwarenessConfig,
 
@@ -109,6 +113,7 @@ struct ConfigLayer {
     confidence: Option<ConfidenceConfigLayer>,
     logging: Option<LoggingConfigLayer>,
     history: Option<HistoryConfigLayer>,
+    interactive: Option<InteractiveConfigLayer>,
     git_awareness: Option<GitAwarenessConfigLayer>,
     agents: Option<AgentsConfig>,
     projects: Option<std::collections::HashMap<String, ProjectConfig>>,
@@ -156,6 +161,18 @@ struct HistoryConfigLayer {
     retention_days: Option<u32>,
     max_size_mb: Option<u32>,
     database_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct InteractiveConfigLayer {
+    enabled: Option<bool>,
+    verification: Option<VerificationMethod>,
+    timeout_seconds: Option<u64>,
+    code_length: Option<usize>,
+    max_attempts: Option<u32>,
+    allow_non_tty_fallback: Option<bool>,
+    disable_in_ci: Option<bool>,
+    require_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -2443,6 +2460,10 @@ impl Config {
             self.merge_history_layer(history);
         }
 
+        if let Some(interactive) = other.interactive {
+            self.merge_interactive_layer(interactive);
+        }
+
         if let Some(git_awareness) = other.git_awareness {
             self.merge_git_awareness_layer(git_awareness);
         }
@@ -2628,6 +2649,33 @@ impl Config {
         }
         if let Some(database_path) = history.database_path {
             self.history.database_path = Some(database_path);
+        }
+    }
+
+    fn merge_interactive_layer(&mut self, interactive: InteractiveConfigLayer) {
+        if let Some(enabled) = interactive.enabled {
+            self.interactive.enabled = enabled;
+        }
+        if let Some(verification) = interactive.verification {
+            self.interactive.verification = verification;
+        }
+        if let Some(timeout_seconds) = interactive.timeout_seconds {
+            self.interactive.timeout_seconds = timeout_seconds;
+        }
+        if let Some(code_length) = interactive.code_length {
+            self.interactive.code_length = code_length;
+        }
+        if let Some(max_attempts) = interactive.max_attempts {
+            self.interactive.max_attempts = max_attempts;
+        }
+        if let Some(allow_non_tty_fallback) = interactive.allow_non_tty_fallback {
+            self.interactive.allow_non_tty_fallback = allow_non_tty_fallback;
+        }
+        if let Some(disable_in_ci) = interactive.disable_in_ci {
+            self.interactive.disable_in_ci = disable_in_ci;
+        }
+        if let Some(require_env) = interactive.require_env {
+            self.interactive.require_env = Some(require_env);
         }
     }
 
@@ -2995,6 +3043,7 @@ impl Config {
             git_awareness: GitAwarenessConfig::default(),
             agents: AgentsConfig::default(),
             projects: std::collections::HashMap::new(),
+            interactive: crate::interactive::InteractiveConfig::default(),
         }
     }
 

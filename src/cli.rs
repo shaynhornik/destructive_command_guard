@@ -2763,6 +2763,7 @@ fn should_prompt_interactively(
     verbosity: Verbosity,
     mode: DecisionMode,
     severity: Option<PackSeverity>,
+    interactive_config: &InteractiveConfig,
 ) -> bool {
     if format == TestFormat::Json || verbosity.quiet {
         return false;
@@ -2777,6 +2778,10 @@ fn should_prompt_interactively(
     }
 
     if std::env::var("DCG_NON_INTERACTIVE").is_ok() || std::env::var("CI").is_ok() {
+        return false;
+    }
+
+    if check_interactive_available(interactive_config).is_err() {
         return false;
     }
 
@@ -2815,25 +2820,18 @@ fn prompt_secure_bypass(
     command: &str,
     reason: &str,
     rule_id: Option<&str>,
+    config: &InteractiveConfig,
 ) -> Option<AllowlistScope> {
     use colored::Colorize;
 
-    let config = InteractiveConfig {
-        enabled: true,
-        timeout_seconds: 30, // More generous timeout for CLI usage
-        code_length: 4,
-        max_attempts: 3,
-        allow_non_tty_fallback: true,
-    };
-
     // Check if interactive mode is available
-    if let Err(reason) = check_interactive_available(&config) {
+    if let Err(reason) = check_interactive_available(config) {
         print_not_available_message(&reason);
         return None;
     }
 
     // Run the security-aware prompt
-    match run_interactive_prompt(command, reason, rule_id, &config) {
+    match run_interactive_prompt(command, reason, rule_id, config) {
         InteractiveResult::AllowlistRequested(scope) => Some(scope),
         InteractiveResult::InvalidCode => {
             eprintln!(
@@ -3188,9 +3186,12 @@ fn test_command(
                         // For medium/low severity, use simpler inquire-based prompt
                         if should_use_secure_prompt(info.severity) {
                             // Security-aware prompt with verification code
-                            if let Some(scope) =
-                                prompt_secure_bypass(command, &info.reason, rule_id.as_deref())
-                            {
+                            if let Some(scope) = prompt_secure_bypass(
+                                command,
+                                &info.reason,
+                                rule_id.as_deref(),
+                                &effective_config.interactive,
+                            ) {
                                 match scope {
                                     AllowlistScope::Once => {
                                         result_line =
@@ -3239,6 +3240,7 @@ fn test_command(
                             verbosity,
                             mode,
                             info.severity,
+                            &effective_config.interactive,
                         ) {
                             // Simpler inquire-based prompt for medium/low severity
                             let action = loop {
@@ -5391,6 +5393,21 @@ fn handle_stats_command(
 
     // Check if log file exists
     if !log_path.exists() {
+        if matches!(cmd.format, StatsFormat::Json) {
+            // Output empty stats for JSON format
+            let empty_stats = stats::AggregatedStats {
+                period_start: 0,
+                period_end: 0,
+                total_entries: 0,
+                total_blocks: 0,
+                total_allows: 0,
+                total_bypasses: 0,
+                total_warns: 0,
+                by_pack: vec![],
+            };
+            print!("{}", stats::format_stats_json(&empty_stats));
+            return Ok(());
+        }
         println!("No log file found at: {}", log_path.display());
         println!();
         println!("To enable logging, add to your config (~/.config/dcg/config.toml):");
@@ -5441,6 +5458,11 @@ fn handle_stats_rules(
     let db = match HistoryDb::open(db_path) {
         Ok(db) => db,
         Err(err) => {
+            if matches!(cmd.format, StatsFormat::Json) {
+                // Output empty metrics for JSON format
+                print!("{}", format_rule_metrics_json(&[], cmd.days)?);
+                return Ok(());
+            }
             if matches!(err, crate::history::HistoryError::Disabled) {
                 println!("History is disabled. Enable it in config to use rule metrics.");
                 println!();
@@ -5462,6 +5484,11 @@ fn handle_stats_rules(
     let metrics = db.get_rule_metrics(since, cmd.limit)?;
 
     if metrics.is_empty() {
+        if matches!(cmd.format, StatsFormat::Json) {
+            // Output empty metrics for JSON format
+            print!("{}", format_rule_metrics_json(&[], cmd.days)?);
+            return Ok(());
+        }
         println!("No rule metrics found in the last {} days.", cmd.days);
         println!();
         println!("Rule metrics are collected when commands are blocked or bypassed.");
@@ -5881,6 +5908,11 @@ fn handle_suggest_allowlist_command(
     let db = match HistoryDb::open(db_path) {
         Ok(db) => db,
         Err(err) => {
+            if matches!(cmd.format, SuggestFormat::Json) {
+                // Output empty array for JSON format
+                println!("[]");
+                return Ok(());
+            }
             if matches!(err, crate::history::HistoryError::Disabled) {
                 println!("History is disabled. Enable it in config to use suggest-allowlist.");
                 return Ok(());
@@ -5903,6 +5935,11 @@ fn handle_suggest_allowlist_command(
     let entries = db.query_commands_for_export(&options)?;
 
     if entries.is_empty() {
+        if matches!(cmd.format, SuggestFormat::Json) {
+            // Output empty array for JSON format
+            println!("[]");
+            return Ok(());
+        }
         println!("No denied commands found in the last {}.", cmd.since);
         println!();
         println!("Suggestions:");
@@ -5940,6 +5977,11 @@ fn handle_suggest_allowlist_command(
     let mut suggestions = generate_enhanced_suggestions(&entry_infos, cmd.min_frequency);
 
     if suggestions.is_empty() {
+        if matches!(cmd.format, SuggestFormat::Json) {
+            // Output empty array for JSON format
+            println!("[]");
+            return Ok(());
+        }
         println!(
             "No commands found that were blocked {} or more times.",
             cmd.min_frequency
@@ -5969,6 +6011,11 @@ fn handle_suggest_allowlist_command(
     suggestions.truncate(cmd.limit);
 
     if suggestions.is_empty() {
+        if matches!(cmd.format, SuggestFormat::Json) {
+            // Output empty array for JSON format
+            println!("[]");
+            return Ok(());
+        }
         println!("No suggestions available.");
         return Ok(());
     }
@@ -12881,6 +12928,7 @@ exclude = ["target/**"]
             verbosity,
             DecisionMode::Deny,
             Some(PackSeverity::Medium),
+            &InteractiveConfig::default(),
         ));
     }
 
@@ -12895,6 +12943,7 @@ exclude = ["target/**"]
             verbosity,
             DecisionMode::Warn,
             Some(PackSeverity::Medium),
+            &InteractiveConfig::default(),
         ));
     }
 }
