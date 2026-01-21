@@ -1105,7 +1105,9 @@ pub struct OverridesConfig {
 /// An extended allowlist rule with optional path conditions.
 ///
 /// This supports context-aware allowlisting where rules can be scoped
-/// to specific directories or path patterns.
+/// to specific directories or path patterns. Rules can also have expiration
+/// settings (mutually exclusive: only one of `expires`, `ttl`, `ttl_seconds`,
+/// or `session` should be set).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AllowlistRule {
     /// The pattern to allow (regex supported).
@@ -1126,21 +1128,45 @@ pub struct AllowlistRule {
     ///
     /// After this time, the rule is no longer active.
     /// Example: "2024-06-01T00:00:00Z"
+    ///
+    /// Mutually exclusive with `ttl`, `ttl_seconds`, and `session`.
     #[serde(default)]
     pub expires: Option<String>,
 
+    /// Optional time-to-live duration as a human-readable string.
+    ///
+    /// Supported formats:
+    /// - Minutes: "30m", "30min", "30 minutes"
+    /// - Hours: "4h", "4hr", "4 hours"
+    /// - Days: "7d", "7 days"
+    /// - Weeks: "1w", "1 week"
+    ///
+    /// TTL is computed from `created_at` timestamp.
+    /// Mutually exclusive with `expires`, `ttl_seconds`, and `session`.
+    #[serde(default)]
+    pub ttl: Option<String>,
+
     /// Optional time-to-live duration in seconds.
     ///
-    /// Alternative to `expires` for relative expiration.
-    /// Computed from first load time.
+    /// Alternative to `ttl` for programmatic use.
+    /// TTL is computed from `created_at` timestamp.
+    /// Mutually exclusive with `expires`, `ttl`, and `session`.
     #[serde(default)]
     pub ttl_seconds: Option<u64>,
 
     /// Whether this is a session-only rule.
     ///
     /// Session rules are not persisted and expire when dcg restarts.
+    /// Mutually exclusive with `expires`, `ttl`, and `ttl_seconds`.
     #[serde(default)]
     pub session: Option<bool>,
+
+    /// Timestamp when this rule was created (ISO 8601 format).
+    ///
+    /// Required for TTL-based expiration. If not set when a TTL is specified,
+    /// it will be automatically set to the current time when the rule is loaded.
+    #[serde(default)]
+    pub created_at: Option<String>,
 }
 
 impl Default for AllowlistRule {
@@ -1150,25 +1176,91 @@ impl Default for AllowlistRule {
             paths: None,
             comment: None,
             expires: None,
+            ttl: None,
             ttl_seconds: None,
             session: None,
+            created_at: None,
         }
     }
+}
+
+/// Parse a human-readable TTL duration string into seconds.
+///
+/// Supported formats:
+/// - Minutes: "30m", "30min", "30 minutes", "30 minute"
+/// - Hours: "4h", "4hr", "4 hours", "4 hour"
+/// - Days: "7d", "7 day", "7 days"
+/// - Weeks: "1w", "1 week", "1 weeks"
+///
+/// # Errors
+///
+/// Returns an error if the format is invalid or the number cannot be parsed.
+pub fn parse_ttl_duration(s: &str) -> Result<u64, String> {
+    let s = s.trim().to_lowercase();
+
+    // Try to extract number and unit
+    let (num_str, unit) = if let Some(pos) = s.find(|c: char| !c.is_ascii_digit()) {
+        let (n, u) = s.split_at(pos);
+        (n.trim(), u.trim())
+    } else {
+        // No unit found - assume seconds
+        return s
+            .parse::<u64>()
+            .map_err(|_| format!("invalid TTL number: '{s}'"));
+    };
+
+    let num: u64 = num_str
+        .parse()
+        .map_err(|_| format!("invalid TTL number: '{num_str}'"))?;
+
+    // Match unit
+    let multiplier = match unit {
+        "s" | "sec" | "secs" | "second" | "seconds" => 1,
+        "m" | "min" | "mins" | "minute" | "minutes" => 60,
+        "h" | "hr" | "hrs" | "hour" | "hours" => 3600,
+        "d" | "day" | "days" => 86400,
+        "w" | "week" | "weeks" => 604_800,
+        _ => return Err(format!("unknown TTL unit: '{unit}'")),
+    };
+
+    num.checked_mul(multiplier)
+        .ok_or_else(|| format!("TTL overflow: {num} * {multiplier}"))
 }
 
 impl AllowlistRule {
     /// Check if this rule is currently active (not expired).
     #[must_use]
     pub fn is_active(&self) -> bool {
-        // Check expires timestamp
+        let now = Utc::now();
+
+        // Check absolute expiration timestamp
         if let Some(expires_str) = &self.expires {
             if let Ok(expires) = DateTime::parse_from_rfc3339(expires_str) {
-                let now = Utc::now();
                 if now >= expires {
                     return false;
                 }
             }
         }
+
+        // Check TTL-based expiration (requires created_at)
+        if let Some(created_str) = &self.created_at {
+            if let Ok(created) = DateTime::parse_from_rfc3339(created_str) {
+                // Try ttl (human-readable) first, then ttl_seconds
+                let ttl_secs = if let Some(ttl_str) = &self.ttl {
+                    parse_ttl_duration(ttl_str).ok()
+                } else {
+                    self.ttl_seconds
+                };
+
+                if let Some(secs) = ttl_secs {
+                    let expires_at = created + chrono::Duration::seconds(secs as i64);
+                    if now >= expires_at {
+                        return false;
+                    }
+                }
+            }
+        }
+
         true
     }
 
@@ -1189,20 +1281,76 @@ impl AllowlistRule {
     /// - Pattern is empty
     /// - Paths contain invalid glob patterns
     /// - Expires format is invalid
+    /// - TTL format is invalid
+    /// - Multiple expiration methods are specified (only one of expires/ttl/ttl_seconds/session allowed)
     pub fn validate(&self) -> Result<(), String> {
         // Pattern must be non-empty
         if self.pattern.trim().is_empty() {
             return Err("allowlist rule pattern must be non-empty".to_string());
         }
 
+        // Count how many expiration methods are set
+        let expiration_count = [
+            self.expires.is_some(),
+            self.ttl.is_some(),
+            self.ttl_seconds.is_some(),
+            self.session.unwrap_or(false),
+        ]
+        .iter()
+        .filter(|&&b| b)
+        .count();
+
+        if expiration_count > 1 {
+            return Err(
+                "only one of expires, ttl, ttl_seconds, or session should be set".to_string(),
+            );
+        }
+
         // Validate expires format if present
         if let Some(expires_str) = &self.expires {
-            if DateTime::parse_from_rfc3339(expires_str).is_err() {
+            match DateTime::parse_from_rfc3339(expires_str) {
+                Ok(expires) => {
+                    // Warn if already expired (not an error, just informational)
+                    let now = Utc::now();
+                    if now >= expires {
+                        // Log warning but don't fail - the rule will just be inactive
+                        eprintln!(
+                            "warning: allowlist rule '{}' has already expired ({})",
+                            self.pattern, expires_str
+                        );
+                    }
+                }
+                Err(_) => {
+                    return Err(format!(
+                        "invalid expires format '{}': expected ISO 8601 (e.g., 2024-06-01T00:00:00Z)",
+                        expires_str
+                    ));
+                }
+            }
+        }
+
+        // Validate TTL format if present
+        if let Some(ttl_str) = &self.ttl {
+            parse_ttl_duration(ttl_str).map_err(|e| format!("invalid TTL '{}': {}", ttl_str, e))?;
+        }
+
+        // Validate created_at format if present
+        if let Some(created_str) = &self.created_at {
+            if DateTime::parse_from_rfc3339(created_str).is_err() {
                 return Err(format!(
-                    "invalid expires format '{}': expected ISO 8601 (e.g., 2024-06-01T00:00:00Z)",
-                    expires_str
+                    "invalid created_at format '{}': expected ISO 8601 (e.g., 2024-06-01T00:00:00Z)",
+                    created_str
                 ));
             }
+        }
+
+        // Warn if TTL is set but created_at is missing (rule won't expire as expected)
+        if (self.ttl.is_some() || self.ttl_seconds.is_some()) && self.created_at.is_none() {
+            eprintln!(
+                "warning: allowlist rule '{}' has TTL but no created_at timestamp; \
+                 TTL will be computed from when the rule is first loaded",
+                self.pattern
+            );
         }
 
         // Validate path patterns (basic check for common mistakes)
@@ -1222,6 +1370,29 @@ impl AllowlistRule {
         }
 
         Ok(())
+    }
+
+    /// Ensure the rule has a created_at timestamp.
+    ///
+    /// If `created_at` is not set and a TTL is specified, this sets it to the
+    /// current time. This should be called when loading rules from config.
+    pub fn ensure_created_at(&mut self) {
+        if self.created_at.is_none() && (self.ttl.is_some() || self.ttl_seconds.is_some()) {
+            self.created_at = Some(Utc::now().to_rfc3339());
+        }
+    }
+
+    /// Get the effective TTL in seconds, if any.
+    ///
+    /// Returns the TTL from either the human-readable `ttl` field or the
+    /// numeric `ttl_seconds` field.
+    #[must_use]
+    pub fn effective_ttl_seconds(&self) -> Option<u64> {
+        if let Some(ttl_str) = &self.ttl {
+            parse_ttl_duration(ttl_str).ok()
+        } else {
+            self.ttl_seconds
+        }
     }
 }
 

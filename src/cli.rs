@@ -569,6 +569,9 @@ pub struct TestOutput {
     /// Reason for blocking
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Explanation for the match (if available)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<String>,
     /// Match source: `config_override`, `pack`, `heredoc_ast`, etc.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -2966,6 +2969,7 @@ fn test_command(
                     pack_id: None,
                     pattern_name: None,
                     reason: None,
+                    explanation: None,
                     source: None,
                     matched_span: None,
                     allowlist,
@@ -2973,29 +2977,30 @@ fn test_command(
                 }
             }
             EvaluationDecision::Deny => {
-                let (pack_id, pattern_name, reason, source_str, matched_span, rule_id) = result
-                    .pattern_info
-                    .as_ref()
-                    .map_or((None, None, None, None, None, None), |info| {
-                        let source_str = match info.source {
-                            MatchSource::ConfigOverride => "config_override",
-                            MatchSource::LegacyPattern => "legacy_pattern",
-                            MatchSource::Pack => "pack",
-                            MatchSource::HeredocAst => "heredoc_ast",
-                        };
-                        let rule_id = info
-                            .pack_id
-                            .as_ref()
-                            .and_then(|p| info.pattern_name.as_ref().map(|n| format!("{p}:{n}")));
-                        (
-                            info.pack_id.clone(),
-                            info.pattern_name.clone(),
-                            Some(info.reason.clone()),
-                            Some(source_str.to_string()),
-                            info.matched_span.as_ref().map(|s| (s.start, s.end)),
-                            rule_id,
-                        )
-                    });
+                let (pack_id, pattern_name, reason, explanation, source_str, matched_span, rule_id) =
+                    result.pattern_info.as_ref().map_or(
+                        (None, None, None, None, None, None, None),
+                        |info| {
+                            let source_str = match info.source {
+                                MatchSource::ConfigOverride => "config_override",
+                                MatchSource::LegacyPattern => "legacy_pattern",
+                                MatchSource::Pack => "pack",
+                                MatchSource::HeredocAst => "heredoc_ast",
+                            };
+                            let rule_id = info.pack_id.as_ref().and_then(|p| {
+                                info.pattern_name.as_ref().map(|n| format!("{p}:{n}"))
+                            });
+                            (
+                                info.pack_id.clone(),
+                                info.pattern_name.clone(),
+                                Some(info.reason.clone()),
+                                info.explanation.clone(),
+                                Some(source_str.to_string()),
+                                info.matched_span.as_ref().map(|s| (s.start, s.end)),
+                                rule_id,
+                            )
+                        },
+                    );
                 TestOutput {
                     command: command.to_string(),
                     decision: "deny".to_string(),
@@ -3003,6 +3008,7 @@ fn test_command(
                     pack_id,
                     pattern_name,
                     reason,
+                    explanation,
                     source: source_str,
                     matched_span,
                     allowlist: None,
@@ -3078,6 +3084,9 @@ fn test_command(
                     println!("Pattern: {pattern_name}");
                 }
                 println!("Reason: {}", info.reason);
+                if let Some(ref explanation) = info.explanation {
+                    println!("Explanation: {explanation}");
+                }
                 let source = match info.source {
                     MatchSource::ConfigOverride => "config override",
                     MatchSource::LegacyPattern => "legacy pattern",

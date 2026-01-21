@@ -6,12 +6,14 @@
 use crate::evaluator::MatchSpan;
 use crate::highlight::HighlightSpan;
 use crate::output::auto_theme;
+#[cfg(feature = "rich-output")]
 use crate::output::console::console;
 use crate::output::denial::DenialBox;
 use crate::output::theme::Severity as ThemeSeverity;
 use crate::packs::PatternSuggestion;
 use colored::Colorize;
 #[cfg(feature = "rich-output")]
+#[allow(unused_imports)]
 use rich_rust::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -318,7 +320,8 @@ pub fn print_colorful_warning(
     pattern_suggestions: &[PatternSuggestion],
     severity: Option<crate::packs::Severity>,
 ) {
-    let _console = console();
+    #[cfg(feature = "rich-output")]
+    let console_instance = console();
     let theme = auto_theme();
 
     // Prepare content for DenialBox
@@ -329,7 +332,7 @@ pub fn print_colorful_warning(
         .map(to_output_severity)
         .unwrap_or(ThemeSeverity::High);
 
-    let explanation_text = format_explanation_text(explanation, rule_id.as_deref(), pack);
+    let explanation_text = explanation.map(str::trim).filter(|text| !text.is_empty());
 
     // Create span for highlighting
     let span = matched_span
@@ -352,7 +355,9 @@ pub fn print_colorful_warning(
     let mut denial = DenialBox::new(command, span, pattern_display, theme_severity)
         .with_alternatives(alternatives);
 
-    denial = denial.with_explanation(explanation_text);
+    if let Some(text) = explanation_text {
+        denial = denial.with_explanation(text);
+    }
 
     if let Some(code) = allow_once_code {
         denial = denial.with_allow_once_code(code);
@@ -364,7 +369,7 @@ pub fn print_colorful_warning(
 
     // Secondary info (Legacy: printed after box; Rich: could use panels)
     #[cfg(feature = "rich-output")]
-    if !_console.is_plain() {
+    if !console_instance.is_plain() {
         // In rich mode, we might want additional panels or info
         // For now, let's keep it simple as DenialBox handles most things
         // But we might want to print the "Learn more" links
@@ -396,20 +401,25 @@ pub fn print_colorful_warning(
 }
 
 #[cfg(feature = "rich-output")]
+#[allow(dead_code)] // TODO: Integrate into rich output path
 fn render_suggestions_panel(suggestions: &[PatternSuggestion]) -> String {
+    use rich_rust::r#box::ROUNDED;
     use rich_rust::prelude::*;
 
-    let mut content = Text::new();
+    // Build content as a Vec of lines, then join
+    let mut lines = Vec::new();
     for (i, s) in suggestions.iter().enumerate() {
-        content.push_line(format!("[bold cyan]{}.[/] {}", i + 1, s.description));
-        content.push_line(format!("   [green]$[/] [cyan]{}[/]", s.command));
+        lines.push(format!("[bold cyan]{}.[/] {}", i + 1, s.description));
+        lines.push(format!("   [green]$[/] [cyan]{}[/]", s.command));
     }
+    let content_str = lines.join("\n");
 
-    Panel::from_text(content.to_string())
+    let width = crate::output::terminal_width() as usize;
+    Panel::from_text(&content_str)
         .title("[yellow bold] 💡 Suggestions [/]")
-        .box_style(rich_rust::box_drawing::BoxStyle::rounded())
-        .border_style(Style::new().yellow())
-        .to_string()
+        .box_style(&ROUNDED)
+        .border_style(Style::new().color(Color::parse("yellow").unwrap_or_default()))
+        .render_plain(width)
 }
 
 /// Truncate a string for display, appending "..." if truncated.
