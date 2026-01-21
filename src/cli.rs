@@ -3999,9 +3999,27 @@ fn handle_scan(
         }
     }
 
-    // Run scan
+    // Run scan with progress reporting
     let repo_root = find_repo_root_from_cwd();
-    let report = scan_paths(
+
+    // Create progress tracker lazily when we know total file count
+    // Use RefCell to allow mutation inside the closure
+    use std::cell::RefCell;
+    let progress: RefCell<Option<MaybeProgress>> = RefCell::new(None);
+
+    let mut progress_callback = |current: usize, total: usize, file: &str| {
+        if current == 0 {
+            // First call signals total file count - initialize progress
+            if !quiet {
+                *progress.borrow_mut() = Some(MaybeProgress::new(total as u64));
+            }
+        } else if let Some(ref p) = *progress.borrow() {
+            // Subsequent calls tick the progress bar
+            p.tick(file);
+        }
+    };
+
+    let report = scan_paths_with_progress(
         &scan_paths_list,
         &options,
         config,
@@ -4009,7 +4027,13 @@ fn handle_scan(
         include,
         exclude,
         repo_root.as_deref(),
+        if quiet { None } else { Some(&mut progress_callback) },
     )?;
+
+    // Finish progress bar if it was created
+    if let Some(ref p) = *progress.borrow() {
+        p.finish_and_clear();
+    }
 
     // Output results
     if !quiet {
