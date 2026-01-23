@@ -1,7 +1,7 @@
 {
   "hookSpecificOutput": {
     "allowOnceCode": "<DYNAMIC>",
-    "allowOnceFullHash": "<DYNAMIC_HASH>",
+    "allowOnceFullHash": "<DYNAMIC>",
     "hookEventName": "PreToolUse",
     "packId": "core.git",
     "permissionDecision": "deny",

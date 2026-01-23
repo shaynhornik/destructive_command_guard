@@ -174,8 +174,8 @@ fn diff_values(path: &str, expected: &Value, actual: &Value, diffs: &mut Vec<Str
 
 #[test]
 fn golden_hook_deny_filesystem() {
-    let ctx = E2ETestContext::new();
-    let output = ctx.run_hook_mode("rm -rf /");
+    let ctx = E2ETestContext::builder("golden_hook_deny_filesystem").build();
+    let output = ctx.run_dcg_hook("rm -rf /");
 
     assert!(output.is_blocked(), "Expected command to be blocked");
     assert!(output.json.is_some(), "Expected JSON output");
@@ -195,8 +195,8 @@ fn golden_hook_deny_filesystem() {
 
 #[test]
 fn golden_hook_deny_git_force_push() {
-    let ctx = E2ETestContext::new();
-    let output = ctx.run_hook_mode("git push --force origin main");
+    let ctx = E2ETestContext::builder("golden_hook_deny_git_force_push").build();
+    let output = ctx.run_dcg_hook("git push --force origin main");
 
     assert!(output.is_blocked(), "Expected command to be blocked");
     assert!(output.json.is_some(), "Expected JSON output");
@@ -214,8 +214,8 @@ fn golden_hook_deny_git_force_push() {
 
 #[test]
 fn golden_hook_deny_git_reset_hard() {
-    let ctx = E2ETestContext::new();
-    let output = ctx.run_hook_mode("git reset --hard");
+    let ctx = E2ETestContext::builder("golden_hook_deny_git_reset_hard").build();
+    let output = ctx.run_dcg_hook("git reset --hard");
 
     assert!(output.is_blocked(), "Expected command to be blocked");
     assert!(output.json.is_some(), "Expected JSON output");
@@ -233,8 +233,8 @@ fn golden_hook_deny_git_reset_hard() {
 
 #[test]
 fn golden_hook_allow_simple() {
-    let ctx = E2ETestContext::new();
-    let output = ctx.run_hook_mode("echo hello");
+    let ctx = E2ETestContext::builder("golden_hook_allow_simple").build();
+    let output = ctx.run_dcg_hook("echo hello");
 
     assert!(output.is_allowed(), "Expected command to be allowed");
     assert!(
@@ -246,8 +246,8 @@ fn golden_hook_allow_simple() {
 
 #[test]
 fn golden_hook_allow_git_status() {
-    let ctx = E2ETestContext::new();
-    let output = ctx.run_hook_mode("git status");
+    let ctx = E2ETestContext::builder("golden_hook_allow_git_status").build();
+    let output = ctx.run_dcg_hook("git status");
 
     assert!(output.is_allowed(), "Expected 'git status' to be allowed");
     assert!(
@@ -258,8 +258,8 @@ fn golden_hook_allow_git_status() {
 
 #[test]
 fn golden_hook_allow_git_checkout_branch() {
-    let ctx = E2ETestContext::new();
-    let output = ctx.run_hook_mode("git checkout -b new-feature");
+    let ctx = E2ETestContext::builder("golden_hook_allow_git_checkout_branch").build();
+    let output = ctx.run_dcg_hook("git checkout -b new-feature");
 
     assert!(
         output.is_allowed(),
@@ -277,8 +277,8 @@ fn golden_hook_allow_git_checkout_branch() {
 
 #[test]
 fn golden_json_structure_has_required_fields() {
-    let ctx = E2ETestContext::new();
-    let output = ctx.run_hook_mode("rm -rf /");
+    let ctx = E2ETestContext::builder("golden_json_structure_has_required_fields").build();
+    let output = ctx.run_dcg_hook("rm -rf /");
 
     let json = output.json.expect("Expected JSON output");
     let hook_output = json
@@ -321,20 +321,20 @@ fn golden_json_structure_has_required_fields() {
 
 #[test]
 fn golden_json_permission_decision_values() {
-    let ctx = E2ETestContext::new();
+    let ctx = E2ETestContext::builder("golden_json_permission_decision_values").build();
 
     // Denied command should have "deny"
-    let denied = ctx.run_hook_mode("rm -rf /");
+    let denied = ctx.run_dcg_hook("rm -rf /");
     let denied_json = denied.json.expect("Expected JSON");
     let decision = denied_json
         .get("hookSpecificOutput")
-        .and_then(|h| h.get("permissionDecision"))
+        .and_then(|h: &Value| h.get("permissionDecision"))
         .and_then(Value::as_str)
         .expect("Missing permissionDecision");
     assert_eq!(decision, "deny", "Denied commands must have permissionDecision='deny'");
 
     // Allowed commands produce no JSON output (empty stdout)
-    let allowed = ctx.run_hook_mode("echo hello");
+    let allowed = ctx.run_dcg_hook("echo hello");
     assert!(
         allowed.stdout.trim().is_empty(),
         "Allowed commands must produce empty stdout"
@@ -343,20 +343,153 @@ fn golden_json_permission_decision_values() {
 
 #[test]
 fn golden_json_severity_values() {
-    let ctx = E2ETestContext::new();
+    let ctx = E2ETestContext::builder("golden_json_severity_values").build();
 
     // Test critical severity
-    let critical = ctx.run_hook_mode("rm -rf /");
+    let critical = ctx.run_dcg_hook("rm -rf /");
     let critical_json = critical.json.expect("Expected JSON");
     let severity = critical_json
         .get("hookSpecificOutput")
-        .and_then(|h| h.get("severity"))
+        .and_then(|h: &Value| h.get("severity"))
         .and_then(Value::as_str)
         .expect("Missing severity");
     assert!(
         ["critical", "high", "medium", "low"].contains(&severity),
         "Invalid severity value: {severity}"
     );
+}
+
+// ============================================================================
+// Robot Mode Golden Tests
+// ============================================================================
+
+/// Run dcg in robot mode via test subcommand
+fn run_robot_mode(command: &str) -> Option<Value> {
+    use std::process::Command;
+
+    let output = Command::new("./target/release/dcg")
+        .args(["--robot", "test", command])
+        .output()
+        .expect("Failed to run dcg");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.trim().is_empty() {
+        return None;
+    }
+
+    serde_json::from_str(&stdout).ok()
+}
+
+#[test]
+fn golden_robot_deny_filesystem() {
+    let json = run_robot_mode("rm -rf /").expect("Expected JSON output from robot mode");
+
+    if let Err(diff) = compare_json_to_golden(&json, "robot/deny_filesystem.json") {
+        panic!("Golden file mismatch:\n{diff}");
+    }
+
+    // Verify critical fields for robot mode
+    assert_eq!(json.get("decision").and_then(Value::as_str), Some("deny"));
+    assert_eq!(json.get("pack_id").and_then(Value::as_str), Some("core.filesystem"));
+    assert_eq!(json.get("severity").and_then(Value::as_str), Some("critical"));
+}
+
+#[test]
+fn golden_robot_deny_git_reset() {
+    let json = run_robot_mode("git reset --hard").expect("Expected JSON output from robot mode");
+
+    if let Err(diff) = compare_json_to_golden(&json, "robot/deny_git_reset.json") {
+        panic!("Golden file mismatch:\n{diff}");
+    }
+
+    assert_eq!(json.get("decision").and_then(Value::as_str), Some("deny"));
+    assert_eq!(json.get("pack_id").and_then(Value::as_str), Some("core.git"));
+    assert_eq!(json.get("rule_id").and_then(Value::as_str), Some("core.git:reset-hard"));
+}
+
+#[test]
+fn golden_robot_deny_git_force_push() {
+    let json = run_robot_mode("git push --force origin main").expect("Expected JSON output from robot mode");
+
+    if let Err(diff) = compare_json_to_golden(&json, "robot/deny_git_force_push.json") {
+        panic!("Golden file mismatch:\n{diff}");
+    }
+
+    assert_eq!(json.get("decision").and_then(Value::as_str), Some("deny"));
+    assert_eq!(json.get("pack_id").and_then(Value::as_str), Some("core.git"));
+}
+
+#[test]
+fn golden_robot_allow_simple() {
+    let json = run_robot_mode("echo hello").expect("Expected JSON output from robot mode");
+
+    if let Err(diff) = compare_json_to_golden(&json, "robot/allow_simple.json") {
+        panic!("Golden file mismatch:\n{diff}");
+    }
+
+    assert_eq!(json.get("decision").and_then(Value::as_str), Some("allow"));
+}
+
+#[test]
+fn golden_robot_allow_git_status() {
+    let json = run_robot_mode("git status").expect("Expected JSON output from robot mode");
+
+    if let Err(diff) = compare_json_to_golden(&json, "robot/allow_git_status.json") {
+        panic!("Golden file mismatch:\n{diff}");
+    }
+
+    assert_eq!(json.get("decision").and_then(Value::as_str), Some("allow"));
+}
+
+#[test]
+fn golden_robot_json_structure_deny() {
+    let json = run_robot_mode("git reset --hard").expect("Expected JSON output");
+
+    // Required fields for robot mode deny response
+    let required_fields = [
+        "command",
+        "decision",
+        "rule_id",
+        "pack_id",
+        "severity",
+        "reason",
+        "explanation",
+        "source",
+    ];
+
+    for field in required_fields {
+        assert!(
+            json.get(field).is_some(),
+            "Required robot mode field '{}' is missing",
+            field
+        );
+    }
+
+    // Verify agent object exists
+    let agent = json.get("agent").expect("Missing agent object");
+    assert!(agent.get("detected").is_some(), "Missing agent.detected");
+    assert!(agent.get("trust_level").is_some(), "Missing agent.trust_level");
+}
+
+#[test]
+fn golden_robot_json_structure_allow() {
+    let json = run_robot_mode("ls -la").expect("Expected JSON output");
+
+    // Required fields for robot mode allow response
+    let required_fields = [
+        "command",
+        "decision",
+    ];
+
+    for field in required_fields {
+        assert!(
+            json.get(field).is_some(),
+            "Required robot mode field '{}' is missing for allow",
+            field
+        );
+    }
+
+    assert_eq!(json.get("decision").and_then(Value::as_str), Some("allow"));
 }
 
 // ============================================================================
