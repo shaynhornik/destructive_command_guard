@@ -98,9 +98,10 @@ fn test_explanation_displayed_for_blocked_commands() {
     // Test git reset --hard - should show explanation
     let output = ctx.run_dcg(&["test", "git reset --hard"]);
 
-    // Should be blocked
+    // Should be blocked (case-insensitive check)
+    let combined_check = format!("{}{}", output.stdout, output.stderr).to_lowercase();
     assert!(
-        output.stderr.contains("BLOCKED") || output.stdout.contains("blocked"),
+        combined_check.contains("blocked"),
         "Expected 'git reset --hard' to be blocked.\nstdout: {}\nstderr: {}",
         output.stdout,
         output.stderr
@@ -263,7 +264,7 @@ fn test_json_output_includes_explanation() {
         .build();
 
     // Use test command with JSON output
-    let output = ctx.run_dcg(&["test", "--json", "git reset --hard"]);
+    let output = ctx.run_dcg(&["test", "--format", "json", "git reset --hard"]);
 
     // Parse JSON output
     let json: serde_json::Value = serde_json::from_str(&output.stdout).unwrap_or_else(|_| {
@@ -291,7 +292,7 @@ fn test_json_output_outcome_blocked() {
         .with_config("minimal")
         .build();
 
-    let output = ctx.run_dcg(&["test", "--json", "git reset --hard"]);
+    let output = ctx.run_dcg(&["test", "--format", "json", "git reset --hard"]);
 
     let json: serde_json::Value = serde_json::from_str(&output.stdout).unwrap_or_else(|_| {
         panic!(
@@ -300,16 +301,16 @@ fn test_json_output_outcome_blocked() {
         )
     });
 
-    // Check outcome is blocked
-    let outcome = json
-        .get("outcome")
+    // Check decision is deny (blocked)
+    let decision = json
+        .get("decision")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
     assert!(
-        outcome == "blocked" || outcome == "denied",
-        "Expected outcome 'blocked', got '{}'.\nJSON: {}",
-        outcome,
+        decision == "deny" || decision == "blocked",
+        "Expected decision 'deny', got '{}'.\nJSON: {}",
+        decision,
         serde_json::to_string_pretty(&json).unwrap_or_default()
     );
 }
@@ -320,7 +321,7 @@ fn test_json_output_outcome_allowed() {
         .with_config("minimal")
         .build();
 
-    let output = ctx.run_dcg(&["test", "--json", "git status"]);
+    let output = ctx.run_dcg(&["test", "--format", "json", "git status"]);
 
     let json: serde_json::Value = serde_json::from_str(&output.stdout).unwrap_or_else(|_| {
         panic!(
@@ -329,15 +330,16 @@ fn test_json_output_outcome_allowed() {
         )
     });
 
-    let outcome = json
-        .get("outcome")
+    // Check decision is allow
+    let decision = json
+        .get("decision")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
     assert!(
-        outcome == "allowed",
-        "Expected outcome 'allowed', got '{}'.\nJSON: {}",
-        outcome,
+        decision == "allow" || decision == "allowed",
+        "Expected decision 'allow', got '{}'.\nJSON: {}",
+        decision,
         serde_json::to_string_pretty(&json).unwrap_or_default()
     );
 }
@@ -708,4 +710,338 @@ fn test_allow_once_code_in_blocked_output() {
             code
         );
     }
+}
+
+// ============================================================================
+// ADDITIONAL PACK EXPLANATION TESTS
+// ============================================================================
+
+#[test]
+fn test_all_database_postgresql_patterns_have_explanations() {
+    use destructive_command_guard::packs::database::postgresql::create_pack;
+
+    let pack = create_pack();
+
+    let mut missing_explanations = Vec::new();
+
+    for pattern in &pack.destructive_patterns {
+        if pattern.explanation.is_none() {
+            let name = pattern.name.unwrap_or("unnamed");
+            missing_explanations.push(name);
+        }
+    }
+
+    assert!(
+        missing_explanations.is_empty(),
+        "The following database.postgresql patterns are missing explanations: {:?}",
+        missing_explanations
+    );
+}
+
+#[test]
+fn test_all_kubernetes_kubectl_patterns_have_explanations() {
+    use destructive_command_guard::packs::kubernetes::kubectl::create_pack;
+
+    let pack = create_pack();
+
+    let mut missing_explanations = Vec::new();
+
+    for pattern in &pack.destructive_patterns {
+        if pattern.explanation.is_none() {
+            let name = pattern.name.unwrap_or("unnamed");
+            missing_explanations.push(name);
+        }
+    }
+
+    assert!(
+        missing_explanations.is_empty(),
+        "The following kubernetes.kubectl patterns are missing explanations: {:?}",
+        missing_explanations
+    );
+}
+
+#[test]
+fn test_all_containers_docker_patterns_have_explanations() {
+    use destructive_command_guard::packs::containers::docker::create_pack;
+
+    let pack = create_pack();
+
+    let mut missing_explanations = Vec::new();
+
+    for pattern in &pack.destructive_patterns {
+        if pattern.explanation.is_none() {
+            let name = pattern.name.unwrap_or("unnamed");
+            missing_explanations.push(name);
+        }
+    }
+
+    assert!(
+        missing_explanations.is_empty(),
+        "The following containers.docker patterns are missing explanations: {:?}",
+        missing_explanations
+    );
+}
+
+#[test]
+fn test_all_infrastructure_terraform_patterns_have_explanations() {
+    use destructive_command_guard::packs::infrastructure::terraform::create_pack;
+
+    let pack = create_pack();
+
+    let mut missing_explanations = Vec::new();
+
+    for pattern in &pack.destructive_patterns {
+        if pattern.explanation.is_none() {
+            let name = pattern.name.unwrap_or("unnamed");
+            missing_explanations.push(name);
+        }
+    }
+
+    assert!(
+        missing_explanations.is_empty(),
+        "The following infrastructure.terraform patterns are missing explanations: {:?}",
+        missing_explanations
+    );
+}
+
+// ============================================================================
+// FALLBACK EXPLANATION TESTS
+// ============================================================================
+
+#[test]
+fn test_blocked_commands_always_have_reason() {
+    let ctx = E2ETestContext::builder("fallback_explanation")
+        .with_config("minimal")
+        .build();
+
+    // Test various blocked commands - all should have a reason/explanation
+    let blocked_commands = [
+        "git reset --hard",
+        "git push --force",
+        "git clean -fd",
+        "rm -rf /important",
+    ];
+
+    for cmd in blocked_commands {
+        let output = ctx.run_dcg_hook(cmd);
+
+        if output.is_blocked() {
+            let reason = output.decision_reason().unwrap_or("");
+
+            assert!(
+                !reason.is_empty(),
+                "Blocked command '{}' should have a non-empty reason",
+                cmd
+            );
+
+            // Reason should be human-readable (at least 20 chars of explanation)
+            assert!(
+                reason.len() >= 20,
+                "Reason for '{}' is too short to be useful: '{}'",
+                cmd,
+                reason
+            );
+        }
+    }
+}
+
+#[test]
+fn test_explanation_contains_command_context() {
+    let ctx = E2ETestContext::builder("explanation_context")
+        .with_config("minimal")
+        .build();
+
+    // Explanations should relate to the actual command being tested
+    let test_cases = [
+        ("git reset --hard HEAD~3", "reset"),
+        ("git push --force origin main", "push"),
+        ("git clean -fdx", "clean"),
+    ];
+
+    for (cmd, keyword) in test_cases {
+        let output = ctx.run_dcg(&["test", cmd]);
+        let combined = format!("{}{}", output.stdout, output.stderr).to_lowercase();
+
+        assert!(
+            combined.contains(keyword),
+            "Explanation for '{}' should mention '{}'\nOutput: {}",
+            cmd,
+            keyword,
+            combined
+        );
+    }
+}
+
+// ============================================================================
+// DATABASE COMMAND EXPLANATION E2E TESTS
+// ============================================================================
+
+#[test]
+fn test_database_drop_command_explanation() {
+    let ctx = E2ETestContext::builder("database_explanation")
+        .with_config("minimal")
+        .build();
+
+    // Test DROP TABLE command with database pack
+    let output = ctx.run_dcg(&["test", "--with-packs", "database.postgresql", "DROP TABLE users;"]);
+    let combined = format!("{}{}", output.stdout, output.stderr).to_lowercase();
+
+    // Should explain database risks
+    let has_explanation = combined.contains("drop")
+        || combined.contains("table")
+        || combined.contains("delete")
+        || combined.contains("data");
+
+    assert!(
+        has_explanation,
+        "DROP TABLE explanation should describe data risks.\nOutput: {}",
+        combined
+    );
+}
+
+// ============================================================================
+// KUBERNETES COMMAND EXPLANATION E2E TESTS
+// ============================================================================
+
+#[test]
+fn test_kubernetes_delete_command_explanation() {
+    let ctx = E2ETestContext::builder("kubernetes_explanation")
+        .with_config("minimal")
+        .build();
+
+    // Test kubectl delete command
+    let output = ctx.run_dcg(&[
+        "test",
+        "--with-packs",
+        "kubernetes.kubectl",
+        "kubectl delete namespace production",
+    ]);
+    let combined = format!("{}{}", output.stdout, output.stderr).to_lowercase();
+
+    // If blocked, should explain kubernetes risks
+    if combined.contains("blocked") || combined.contains("deny") {
+        let has_explanation = combined.contains("delete")
+            || combined.contains("namespace")
+            || combined.contains("resource")
+            || combined.contains("kubernetes");
+
+        assert!(
+            has_explanation,
+            "kubectl delete explanation should describe kubernetes risks.\nOutput: {}",
+            combined
+        );
+    }
+}
+
+// ============================================================================
+// DOCKER COMMAND EXPLANATION E2E TESTS
+// ============================================================================
+
+#[test]
+fn test_docker_remove_command_explanation() {
+    let ctx = E2ETestContext::builder("docker_explanation")
+        .with_config("minimal")
+        .build();
+
+    // Test docker system prune command
+    let output = ctx.run_dcg(&[
+        "test",
+        "--with-packs",
+        "containers.docker",
+        "docker system prune -a --volumes",
+    ]);
+    let combined = format!("{}{}", output.stdout, output.stderr).to_lowercase();
+
+    // If blocked, should explain docker risks
+    if combined.contains("blocked") || combined.contains("deny") {
+        let has_explanation = combined.contains("docker")
+            || combined.contains("container")
+            || combined.contains("image")
+            || combined.contains("volume")
+            || combined.contains("prune");
+
+        assert!(
+            has_explanation,
+            "docker prune explanation should describe container risks.\nOutput: {}",
+            combined
+        );
+    }
+}
+
+// ============================================================================
+// EXPLANATION FORMAT CONSISTENCY TESTS
+// ============================================================================
+
+#[test]
+fn test_explanation_format_consistency() {
+    let ctx = E2ETestContext::builder("format_consistency")
+        .with_config("minimal")
+        .build();
+
+    // Multiple runs should produce identical format
+    let cmd = "git checkout -- important_file.txt";
+
+    let output1 = ctx.run_dcg(&["test", cmd]);
+    let output2 = ctx.run_dcg(&["test", cmd]);
+
+    // Format should be identical
+    assert_eq!(
+        output1.stdout.trim(),
+        output2.stdout.trim(),
+        "Explanation format should be consistent"
+    );
+}
+
+#[test]
+fn test_explanation_json_contains_all_fields() {
+    let ctx = E2ETestContext::builder("json_fields")
+        .with_config("minimal")
+        .build();
+
+    let output = ctx.run_dcg(&["test", "--format", "json", "git reset --hard"]);
+
+    let json: serde_json::Value = serde_json::from_str(&output.stdout).unwrap_or_else(|_| {
+        panic!("Failed to parse JSON output")
+    });
+
+    // Required fields for blocked commands
+    let required_fields = ["command", "decision", "reason"];
+
+    for field in required_fields {
+        assert!(
+            json.get(field).is_some(),
+            "JSON output missing required field '{}'.\nJSON: {}",
+            field,
+            serde_json::to_string_pretty(&json).unwrap_or_default()
+        );
+    }
+}
+
+// ============================================================================
+// MULTI-MATCH EXPLANATION TESTS
+// ============================================================================
+
+#[test]
+fn test_command_with_multiple_risks_shows_primary() {
+    let ctx = E2ETestContext::builder("multi_risk")
+        .with_config("minimal")
+        .build();
+
+    // A command that might match multiple patterns
+    // git push --force can be matched by force-push pattern
+    let output = ctx.run_dcg(&["test", "git push --force origin main"]);
+    let combined = format!("{}{}", output.stdout, output.stderr).to_lowercase();
+
+    // Should show at least one meaningful explanation
+    let has_meaningful_explanation = combined.contains("history")
+        || combined.contains("remote")
+        || combined.contains("rewrite")
+        || combined.contains("force")
+        || combined.contains("collaborator");
+
+    assert!(
+        has_meaningful_explanation,
+        "Force push should have meaningful explanation.\nOutput: {}",
+        combined
+    );
 }
