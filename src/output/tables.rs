@@ -1112,7 +1112,7 @@ mod tests {
         let output = table.render();
 
         // Markdown tables use | as separators
-        assert!(output.contains("|"));
+        assert!(output.contains('|'));
         assert!(output.contains("test.sh"));
     }
 
@@ -1233,7 +1233,7 @@ mod tests {
         let table = StatsTable::new(rows).with_style(TableStyle::Ascii);
         let output = table.render();
 
-        assert!(output.contains("-")); // Nil noise should show dash
+        assert!(output.contains('-')); // Nil noise should show dash
     }
 
     #[test]
@@ -1268,7 +1268,7 @@ mod tests {
         let output = table.render();
 
         // Missing command should show dash
-        assert!(output.contains("-"));
+        assert!(output.contains('-'));
     }
 
     // ==================== rich_rust-specific tests ====================

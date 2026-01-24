@@ -2184,7 +2184,7 @@ impl HistoryDb {
         }
 
         // Sort by total triggers descending
-        patterns.sort_by(|a, b| b.total_triggers.cmp(&a.total_triggers));
+        patterns.sort_by_key(|p| std::cmp::Reverse(p.total_triggers));
 
         Ok(patterns)
     }
@@ -2219,7 +2219,7 @@ impl HistoryDb {
         }
 
         // Sort high-value by volume descending
-        high_value.sort_by(|a, b| b.total_triggers.cmp(&a.total_triggers));
+        high_value.sort_by_key(|p| std::cmp::Reverse(p.total_triggers));
         // Sort aggressive by bypass rate descending
         aggressive.sort_by(|a, b| {
             b.bypass_rate
@@ -2396,7 +2396,7 @@ impl HistoryDb {
         }
 
         // Sort by priority descending
-        recommendations.sort_by(|a, b| b.priority.cmp(&a.priority));
+        recommendations.sort_by_key(|r| std::cmp::Reverse(r.priority));
         recommendations
     }
 

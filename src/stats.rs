@@ -182,7 +182,7 @@ pub fn parse_log_file(path: &Path, period_secs: u64) -> std::io::Result<Aggregat
 
     // Sort packs by block count descending
     let mut by_pack: Vec<PackStats> = pack_stats.into_values().collect();
-    by_pack.sort_by(|a, b| b.blocks.cmp(&a.blocks));
+    by_pack.sort_by_key(|p| std::cmp::Reverse(p.blocks));
 
     let mut stats = AggregatedStats {
         period_start: cutoff,

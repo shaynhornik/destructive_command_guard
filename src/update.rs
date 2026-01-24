@@ -141,7 +141,7 @@ pub fn list_backups() -> Result<Vec<BackupEntry>, VersionCheckError> {
     }
 
     // Sort by creation time, newest first
-    entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.created_at));
 
     Ok(entries)
 }
@@ -1218,7 +1218,7 @@ mod tests {
         ];
 
         // Sort as list_backups does
-        entries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.created_at));
 
         assert_eq!(entries[0].version, "0.2.12");
         assert_eq!(entries[1].version, "0.2.11");
