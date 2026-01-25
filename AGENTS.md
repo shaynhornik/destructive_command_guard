@@ -386,7 +386,7 @@ Common failures:
 
 ## Third-Party Library Usage
 
-If you aren't 100% sure how to use a third-party library, **SEARCH ONLINE** to find the latest documentation and mid-2025 best practices.
+If you aren't 100% sure how to use a third-party library, **SEARCH ONLINE** to find the latest documentation and current best practices.
 
 ---
 
@@ -1047,7 +1047,7 @@ br list --status=open # All open issues
 br show <id>          # Full issue details with dependencies
 br create --title="..." --type=task --priority=2
 br update <id> --status=in_progress
-br close <id> --reason="Completed"
+br close <id> --reason "Completed"
 br close <id1> <id2>  # Close multiple issues at once
 br sync --flush-only  # Export to JSONL (NO git operations)
 ```
