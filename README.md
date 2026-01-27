@@ -222,7 +222,7 @@ dcg uses a modular "pack" system to organize destructive command patterns by cat
 - `infrastructure.terraform` - Protects against destructive Terraform operations like destroy, taint, and apply with -auto-approve.
 
 ### System Packs
-- `system.disk` - Protects against destructive disk operations like dd to devices, mkfs, and partition table modifications.
+- `system.disk` - Protects against destructive disk operations including dd to devices, mkfs, partition table modifications (fdisk/parted), RAID management (mdadm), btrfs filesystem operations, device-mapper (dmsetup), network block devices (nbd-client), and LVM commands (pvremove, vgremove, lvremove, lvreduce, pvmove).
 - `system.permissions` - Protects against dangerous permission changes like chmod 777, recursive chmod/chown on system directories.
 - `system.services` - Protects against dangerous service operations like stopping critical services and modifying init configuration.
 
@@ -726,8 +726,8 @@ This project uses Rust Edition 2024 features and requires the nightly toolchain.
 # Install Rust nightly if you don't have it
 rustup install nightly
 
-# Install directly from GitHub
-cargo +nightly install --git https://github.com/Dicklesworthstone/destructive_command_guard
+# Install directly from GitHub (package name required due to workspace)
+cargo +nightly install --git https://github.com/Dicklesworthstone/destructive_command_guard destructive_command_guard
 ```
 
 ### Manual build
