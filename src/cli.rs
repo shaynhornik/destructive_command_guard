@@ -2229,10 +2229,12 @@ fn list_packs(
         .collect();
 
     // Include external packs from custom_paths
+    // External packs are auto-enabled when loaded (same behavior as test_command_inner)
     if let Some(external_store) = get_external_packs() {
         for (id, pack) in external_store.iter_packs() {
-            // External packs loaded via custom_paths are always enabled
-            let is_enabled = enabled_packs.contains(id);
+            // External packs loaded via custom_paths are always enabled by convention
+            // (if you add a pack to custom_paths, you want it active)
+            let is_enabled = true;
             if enabled_only && !is_enabled {
                 continue;
             }
