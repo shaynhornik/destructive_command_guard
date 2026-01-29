@@ -2481,11 +2481,23 @@ impl Config {
 
     /// Load user configuration.
     ///
-    /// Checks both XDG-style (`~/.config/dcg/`) and platform-native paths.
+    /// Checks XDG_CONFIG_HOME, XDG-style (`~/.config/dcg/`), and platform-native paths.
     /// This ensures users can use `~/.config/dcg/config.toml` on all platforms,
     /// including macOS where `dirs::config_dir()` returns `~/Library/Application Support`.
     fn load_user_config_layer() -> Option<ConfigLayer> {
-        // First try XDG-style path (~/.config/dcg/config.toml)
+        // First try XDG_CONFIG_HOME (if set)
+        if let Ok(xdg_home) = env::var("XDG_CONFIG_HOME") {
+            if !xdg_home.trim().is_empty() {
+                let xdg_path = PathBuf::from(xdg_home).join("dcg").join(CONFIG_FILE_NAME);
+                if xdg_path.exists() {
+                    if let Some(layer) = Self::load_layer_from_file(&xdg_path) {
+                        return Some(layer);
+                    }
+                }
+            }
+        }
+
+        // Next try XDG-style path (~/.config/dcg/config.toml)
         // This is what users expect and works consistently across platforms
         if let Some(home) = dirs::home_dir() {
             let xdg_path = home.join(".config").join("dcg").join(CONFIG_FILE_NAME);
@@ -3100,7 +3112,28 @@ impl Config {
     /// Get the path to the user config file (creates dir if needed).
     #[must_use]
     pub fn user_config_path() -> Option<PathBuf> {
-        let config_dir = dirs::config_dir()?;
+        let config_dir = if let Ok(xdg_home) = env::var("XDG_CONFIG_HOME") {
+            if xdg_home.trim().is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(xdg_home))
+            }
+        } else {
+            None
+        };
+
+        let config_dir = if let Some(config_dir) = config_dir {
+            config_dir
+        } else if let Some(home) = dirs::home_dir() {
+            let xdg_dir = home.join(".config").join("dcg");
+            if xdg_dir.exists() {
+                home.join(".config")
+            } else {
+                dirs::config_dir().unwrap_or_else(|| home.join(".config"))
+            }
+        } else {
+            dirs::config_dir()?
+        };
         let guard_dir = config_dir.join("dcg");
 
         // Create directory if it doesn't exist
