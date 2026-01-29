@@ -24,7 +24,7 @@ use crate::interactive::{
     print_not_available_message, run_interactive_prompt,
 };
 use crate::load_default_allowlists;
-use crate::packs::{DecisionMode, REGISTRY, Severity as PackSeverity, load_external_packs};
+use crate::packs::{DecisionMode, REGISTRY, Severity as PackSeverity, get_external_packs, load_external_packs};
 use crate::pending_exceptions::{
     AllowOnceEntry, AllowOnceScopeKind, AllowOnceStore, PendingExceptionRecord,
     PendingExceptionStore,
@@ -1710,6 +1710,10 @@ pub fn run_command(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 format
             };
 
+            // Load external packs from custom_paths so they appear in the listing
+            let external_paths = config.packs.expand_custom_paths();
+            let _ = load_external_packs(&external_paths);
+
             list_packs(
                 &config,
                 enabled,
@@ -2207,7 +2211,7 @@ fn list_packs(
     let infos = REGISTRY.list_packs(&enabled_packs);
 
     // Build pack list (filtered if enabled_only)
-    let pack_list: Vec<PackInfo> = infos
+    let mut pack_list: Vec<PackInfo> = infos
         .iter()
         .filter(|info| !enabled_only || info.enabled)
         .map(|info| {
@@ -2224,13 +2228,35 @@ fn list_packs(
         })
         .collect();
 
+    // Include external packs from custom_paths
+    if let Some(external_store) = get_external_packs() {
+        for (id, pack) in external_store.iter_packs() {
+            // External packs loaded via custom_paths are always enabled
+            let is_enabled = enabled_packs.contains(id);
+            if enabled_only && !is_enabled {
+                continue;
+            }
+            let category = id.split('.').next().unwrap_or(id).to_string();
+            pack_list.push(PackInfo {
+                id: id.clone(),
+                name: pack.name.to_string(),
+                category,
+                description: pack.description.to_string(),
+                enabled: is_enabled,
+                safe_pattern_count: pack.safe_patterns.len(),
+                destructive_pattern_count: pack.destructive_patterns.len(),
+            });
+        }
+    }
+
     // Handle JSON output
+    let total_count = infos.len() + get_external_packs().map_or(0, |s| s.len());
     if format == PacksFormat::Json {
         let enabled_count = pack_list.iter().filter(|p| p.enabled).count();
         let output = PacksOutput {
             packs: pack_list,
             enabled_count,
-            total_count: infos.len(),
+            total_count,
         };
         println!("{}", serde_json::to_string_pretty(&output).unwrap());
         return;
@@ -8573,7 +8599,14 @@ fn claude_settings_path() -> std::path::PathBuf {
 /// all platforms, including macOS where `dirs::config_dir()` returns
 /// `~/Library/Application Support`.
 fn config_dir() -> std::path::PathBuf {
-    // Check XDG-style path first (~/.config/dcg/)
+    // Check XDG_CONFIG_HOME first (if set)
+    if let Ok(xdg_home) = std::env::var("XDG_CONFIG_HOME") {
+        if !xdg_home.trim().is_empty() {
+            return std::path::PathBuf::from(xdg_home).join("dcg");
+        }
+    }
+
+    // Check XDG-style path next (~/.config/dcg/)
     if let Some(home) = dirs::home_dir() {
         let xdg_dir = home.join(".config").join("dcg");
         if xdg_dir.exists() {
@@ -8589,6 +8622,32 @@ fn config_dir() -> std::path::PathBuf {
 
 /// Get the path to dcg config file
 fn config_path() -> std::path::PathBuf {
+    // Prefer an existing config file in the same order as config loading.
+    if let Ok(xdg_home) = std::env::var("XDG_CONFIG_HOME") {
+        if !xdg_home.trim().is_empty() {
+            let path = std::path::PathBuf::from(xdg_home)
+                .join("dcg")
+                .join("config.toml");
+            if path.exists() {
+                return path;
+            }
+        }
+    }
+
+    if let Some(home) = dirs::home_dir() {
+        let path = home.join(".config").join("dcg").join("config.toml");
+        if path.exists() {
+            return path;
+        }
+    }
+
+    if let Some(config_dir) = dirs::config_dir() {
+        let path = config_dir.join("dcg").join("config.toml");
+        if path.exists() {
+            return path;
+        }
+    }
+
     config_dir().join("config.toml")
 }
 
