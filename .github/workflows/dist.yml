@@ -33,7 +33,7 @@ jobs:
         include:
           # Linux x86_64
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             artifact_name: dcg
           # Linux ARM64 (native build on ARM64 runner)
           - os: ubuntu-24.04-arm
@@ -58,6 +58,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install musl-tools
+        if: contains(matrix.target, 'musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
