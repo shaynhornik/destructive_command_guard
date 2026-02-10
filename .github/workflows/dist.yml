@@ -63,7 +63,7 @@ jobs:
         if: contains(matrix.target, 'musl')
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools
+          sudo apt-get install -y musl-tools pkg-config perl
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
